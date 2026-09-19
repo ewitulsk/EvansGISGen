@@ -30,12 +30,17 @@ public final class GeoDataset {
     private static final int MAX_CACHED_TILES = 512;
 
     @Nullable private final Path root;
+    private final String name;
+    private final int tileCount;
     private final GeoTransform transform;
     private final int tileSize;
     private final LoadingCache<Long, Optional<GeoTile>> tiles;
 
-    private GeoDataset(@Nullable Path root, GeoTransform transform, int tileSize) {
+    private GeoDataset(@Nullable Path root, String name, int tileCount,
+            GeoTransform transform, int tileSize) {
         this.root = root;
+        this.name = name;
+        this.tileCount = tileCount;
         this.transform = transform;
         this.tileSize = tileSize;
         this.tiles = CacheBuilder.newBuilder()
@@ -44,7 +49,7 @@ public final class GeoDataset {
     }
 
     public static GeoDataset empty() {
-        return new GeoDataset(null, GeoTransform.DEFAULT, DEFAULT_TILE_SIZE);
+        return new GeoDataset(null, "<none>", 0, GeoTransform.DEFAULT, DEFAULT_TILE_SIZE);
     }
 
     /**
@@ -53,12 +58,12 @@ public final class GeoDataset {
      */
     public static GeoDataset load(@Nullable Path root, GeoTransform fallbackTransform) {
         if (root == null || !Files.isDirectory(root)) {
-            return new GeoDataset(null, fallbackTransform, DEFAULT_TILE_SIZE);
+            return new GeoDataset(null, "<none>", 0, fallbackTransform, DEFAULT_TILE_SIZE);
         }
         Path manifestFile = root.resolve("manifest.json");
         if (!Files.isRegularFile(manifestFile)) {
             LOGGER.warn("Dataset at {} has no manifest.json; ignoring", root);
-            return new GeoDataset(null, fallbackTransform, DEFAULT_TILE_SIZE);
+            return new GeoDataset(null, "<none>", 0, fallbackTransform, DEFAULT_TILE_SIZE);
         }
         try {
             JsonObject manifest = GSON.fromJson(Files.readString(manifestFile), JsonObject.class);
@@ -67,17 +72,30 @@ public final class GeoDataset {
                     : fallbackTransform;
             int tileSize = manifest.has("tile_size") ? manifest.get("tile_size").getAsInt() : DEFAULT_TILE_SIZE;
             String name = manifest.has("name") ? manifest.get("name").getAsString() : root.getFileName().toString();
-            LOGGER.info("Loaded GeoWorld dataset '{}' from {} ({} tiles)", name, root,
-                    manifest.has("tile_count") ? manifest.get("tile_count").getAsInt() : -1);
-            return new GeoDataset(root, transform, tileSize);
+            int tileCount = manifest.has("tile_count") ? manifest.get("tile_count").getAsInt() : -1;
+            LOGGER.info("Loaded GeoWorld dataset '{}' from {} ({} tiles)", name, root, tileCount);
+            return new GeoDataset(root, name, tileCount, transform, tileSize);
         } catch (IOException | RuntimeException e) {
             LOGGER.warn("Failed to read dataset manifest {}: {}", manifestFile, e.toString());
-            return new GeoDataset(null, fallbackTransform, DEFAULT_TILE_SIZE);
+            return new GeoDataset(null, "<none>", 0, fallbackTransform, DEFAULT_TILE_SIZE);
         }
     }
 
     public boolean isEmpty() {
         return root == null;
+    }
+
+    public String name() {
+        return name;
+    }
+
+    public int tileCount() {
+        return tileCount;
+    }
+
+    @Nullable
+    public Path root() {
+        return root;
     }
 
     public GeoTransform transform() {

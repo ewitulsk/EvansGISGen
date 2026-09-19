@@ -1,6 +1,7 @@
 package com.evansgisgen.geoworld.debug;
 
 import com.evansgisgen.geoworld.GeoWorldMod;
+import com.evansgisgen.geoworld.geo.GeoDataset;
 import com.evansgisgen.geoworld.geo.GeoPoint;
 import com.evansgisgen.geoworld.geo.GeoTransform;
 import com.mojang.brigadier.arguments.DoubleArgumentType;
@@ -39,6 +40,11 @@ public final class GeoWorldCommands {
                 "GeoWorld origin=(%d, %d) scale=(%.3f horiz, %.3f vert m/block) datum=(%.1f m -> y%d)",
                 t.originX(), t.originZ(), t.horizontalMetersPerBlock(), t.verticalMetersPerBlock(),
                 t.datumElevationMeters(), t.datumY())), false);
+        GeoDataset dataset = GeoWorldMod.dataset();
+        source.sendSuccess(() -> Component.literal(dataset.isEmpty()
+                ? "GeoWorld dataset: none (Phase 0 fallback circle active)"
+                : String.format("GeoWorld dataset: '%s' (%d tiles) at %s",
+                        dataset.name(), dataset.tileCount(), dataset.root())), false);
         return 1;
     }
 
