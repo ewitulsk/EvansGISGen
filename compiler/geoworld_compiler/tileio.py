@@ -26,7 +26,8 @@ LAYER_BITS = {
     "influence": 0x02,   # u8[TILE^2]   0..255 geographic influence
     "surface": 0x04,     # u8[TILE^2]   surface class ids
     "road": 0x08,        # u8[TILE^2]   road class ids
-    "water": 0x10,       # bitset, ceil(TILE^2/8) bytes
+    "water": 0x10,       # bitset, ceil(TILE^2/8) bytes  (footprint mask)
+    "water_depth": 0x20, # u8[TILE^2]   water depth in blocks (0 = dry)
 }
 _LAYER_ORDER = sorted(LAYER_BITS, key=LAYER_BITS.get)
 

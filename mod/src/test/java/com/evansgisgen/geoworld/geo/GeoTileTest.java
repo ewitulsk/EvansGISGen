@@ -22,6 +22,7 @@ import org.junit.jupiter.api.Test;
  *   influence[i] = i % 256               (u8)
  *   surface[i]   = i % 17                (u8)
  *   water bit i  = set iff i % 3 == 0
+ *   water_depth[i] = i % 5               (u8)
  * </pre>
  *
  * i = localZ * 256 + localX.
@@ -79,6 +80,17 @@ class GeoTileTest {
         assertTrue(tile.water(3, 0));
         assertFalse(tile.water(0, 1));                     // i = 256, 256 % 3 != 0
         assertTrue(tile.water(2, 1));                      // i = 258, 258 % 3 == 0
+    }
+
+    @Test
+    void waterDepth() throws IOException {
+        GeoTile tile = loadFixture();
+        assertTrue(tile.hasWaterDepth());
+        assertEquals(0, tile.waterDepth(0, 0));
+        assertEquals(1, tile.waterDepth(1, 0));
+        assertEquals(4, tile.waterDepth(4, 0));
+        assertEquals(1, tile.waterDepth(0, 1));            // i = 256 -> 256 % 5
+        assertEquals(0, tile.waterDepth(255, 255));        // i = 65535 -> 65535 % 5
     }
 
     /**

@@ -13,7 +13,7 @@ dataset). See [PLAN.md](PLAN.md) for the full implementation plan.
 └── format/     # dataset format spec
 ```
 
-## Current status: Phase 4
+## Current status: Phase 5
 
 - `GeoChunkGenerator` wraps a vanilla `ChunkGenerator` (`geoworld:geoworld`)
   and delegates everything to it, then deforms terrain from geographic data:
@@ -37,6 +37,14 @@ dataset). See [PLAN.md](PLAN.md) for the full implementation plan.
   corridor just adds another source. The survey's `blend_matches_field`
   assertions verify generated terrain follows `lerp(vanilla, geo, w)`
   across the boundary transect.
+- Hydrology (Phase 5): `fetch-water` pulls OSM waterways/water bodies via
+  Overpass; `hydro.py` rasterizes them into a per-cell channel-depth field
+  (per-class widths, `smootherstep` bank profile via distance transforms).
+  The build bakes the riverbed into `elevation` and stores `water_depth`
+  (u8 blocks); the generator fills `bed+1..bed+depth` with water, so the
+  Big Blue River is a real channel — not a DEM artifact. Vanilla surface
+  water (ponds, seas) above the deformed surface is stripped; aquifer/cave
+  water below it survives.
 - `geoworld_compiler` (Python) writes the format: `manifest.json` + 256x256
   tiles with zlib-compressed sections (elevation int16, influence u8,
   surface/road u8, water bitset). `dem.py` mosaics + reprojects real elevation

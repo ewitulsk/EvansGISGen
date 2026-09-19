@@ -83,6 +83,7 @@ then one section per set mask bit, in ascending bit order:
 | 0x04 | surface   | `u8[65536]` surface class ids (Phase 7)   |
 | 0x08 | road      | `u8[65536]` road class ids (Phase 6)      |
 | 0x10 | water     | bitset, 8192 bytes; bit `i` = column `i`  |
+| 0x20 | water_depth | `u8[65536]` water depth in blocks (0 = dry) |
 
 Bitset packing: bit `i` is bit `i % 8` (LSB-first) of byte `i / 8`.
 
@@ -94,6 +95,11 @@ Notes:
   than a height.
 - `influence` of 0 means "vanilla"; 255 means "fully geographic". The compiler
   precomputes the field so the runtime does no polygon distance math.
+- `water` is the footprint mask; `water_depth` (Phase 5) is the water column
+  depth in blocks. At wet columns `elevation` holds the **channel bed** Y
+  (the compiler bakes the riverbed into the elevation layer), and the runtime
+  fills `bed+1 .. bed+depth` with water — so the water surface lands at
+  `bed + depth`, which is the DEM's water-surface elevation.
 - Unknown mask bits should be skipped by readers after parsing their section
   header (forward compatibility). Sections always appear in ascending bit
   order.

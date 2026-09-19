@@ -30,6 +30,7 @@ public final class GeoTile {
     static final int LAYER_SURFACE = 0x04;
     static final int LAYER_ROAD = 0x08;
     static final int LAYER_WATER = 0x10;
+    static final int LAYER_WATER_DEPTH = 0x20;
 
     private final int tileX;
     private final int tileZ;
@@ -39,10 +40,11 @@ public final class GeoTile {
     @Nullable private final byte[] surface;
     @Nullable private final byte[] road;
     @Nullable private final byte[] waterBits;
+    @Nullable private final byte[] waterDepth;
 
     private GeoTile(int tileX, int tileZ, int tileSize, @Nullable short[] elevation,
             @Nullable byte[] influence, @Nullable byte[] surface, @Nullable byte[] road,
-            @Nullable byte[] waterBits) {
+            @Nullable byte[] waterBits, @Nullable byte[] waterDepth) {
         this.tileX = tileX;
         this.tileZ = tileZ;
         this.tileSize = tileSize;
@@ -51,6 +53,7 @@ public final class GeoTile {
         this.surface = surface;
         this.road = road;
         this.waterBits = waterBits;
+        this.waterDepth = waterDepth;
     }
 
     public static GeoTile read(Path file, int tileSize) throws IOException {
@@ -76,8 +79,9 @@ public final class GeoTile {
         byte[] surface = null;
         byte[] road = null;
         byte[] water = null;
+        byte[] waterDepth = null;
 
-        for (int bit = 1; bit <= 0x10; bit <<= 1) {
+        for (int bit = 1; bit <= 0x20; bit <<= 1) {
             if ((mask & bit) == 0) {
                 continue;
             }
@@ -96,10 +100,12 @@ public final class GeoTile {
                 case LAYER_SURFACE -> surface = payload;
                 case LAYER_ROAD -> road = payload;
                 case LAYER_WATER -> water = payload;
+                case LAYER_WATER_DEPTH -> waterDepth = payload;
                 default -> { /* unknown bit, already skipped by mask check */ }
             }
         }
-        return new GeoTile(tileX, tileZ, tileSize, elevation, influence, surface, road, water);
+        return new GeoTile(tileX, tileZ, tileSize, elevation, influence, surface, road,
+                water, waterDepth);
     }
 
     private static byte[] decompress(int codec, byte[] stored, int rawLen) throws IOException {
@@ -176,11 +182,28 @@ public final class GeoTile {
     }
 
     public boolean hasWater() {
-        return waterBits != null;
+        return waterBits != null || waterDepth != null;
     }
 
+    /** Water footprint: bitset if present, else derived from depth > 0. */
     public boolean water(int localX, int localZ) {
-        int i = idx(localX, localZ);
-        return (waterBits[i >> 3] >> (i & 7) & 1) != 0;
+        if (waterBits != null) {
+            int i = idx(localX, localZ);
+            return (waterBits[i >> 3] >> (i & 7) & 1) != 0;
+        }
+        return waterDepth(localX, localZ) > 0;
+    }
+
+    public boolean hasWaterDepth() {
+        return waterDepth != null;
+    }
+
+    /**
+     * Water depth in blocks for this column (0 = dry). The elevation layer
+     * at wet columns is the channel bed; the runtime fills
+     * {@code bed+1 .. bed+depth} with water.
+     */
+    public int waterDepth(int localX, int localZ) {
+        return waterDepth == null ? 0 : waterDepth[idx(localX, localZ)] & 0xFF;
     }
 }

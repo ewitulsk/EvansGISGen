@@ -47,6 +47,8 @@ public final class TerrainSurveyScenario {
             // over the outer ~500 m of coverage) — the Phase 4 check that the
             // geographic-to-vanilla blend actually follows the field.
             {3300, 0}, {3500, 0}, {3600, 0}, {3700, 0}, {3800, 0}, {3900, 0},
+            // Big Blue River channel (Phase 5): compiled water_depth > 0.
+            {1243, 1782}, {-638, 501}, {2100, 824},
             {5000, 0}, {-5000, -5000},
     };
 
@@ -78,9 +80,10 @@ public final class TerrainSurveyScenario {
         }
     }
 
-    private record ColumnReport(int x, int z, int topY, int groundY, BlockState top,
-                                int waterInTop24, int target, double weight,
-                                int vanilla, int expected, List<String> topBlocks) {}
+    private record ColumnReport(int x, int z, int topY, int groundY, int oceanY,
+                                BlockState top, int waterInTop24, int target,
+                                double weight, int waterDepth, int vanilla,
+                                int expected, List<String> topBlocks) {}
 
     private void run(MinecraftServer server) {
         ServerLevel level = server.overworld();
@@ -131,21 +134,39 @@ public final class TerrainSurveyScenario {
         for (ColumnReport r : fullInfluence) {
             // Ground (leaf-stripped motion-blocking top) is the terrain
             // surface; topY can carry trees from a neighboring chunk's
-            // decoration, which is timing-dependent to observe.
+            // decoration, which is timing-dependent to observe. On wet
+            // columns the motion-blocking heightmap counts the water column,
+            // so measure the bed with OCEAN_FLOOR instead.
+            int measured = r.waterDepth > 0 ? r.oceanY : r.groundY;
             pass &= check(String.format("height_matches_dataset_%d_%d", r.x, r.z),
-                    Math.abs(r.groundY - r.target) <= 6);
+                    Math.abs(measured - r.target) <= 6);
         }
         for (ColumnReport r : reports) {
+            // Compiled water columns are asserted by water_surface_* below.
+            if (r.waterDepth > 0) {
+                continue;
+            }
             pass &= check(String.format("no_water_surface_%d_%d", r.x, r.z),
                     !r.top.is(Blocks.WATER));
         }
         // Phase 4: the generated ground must follow lerp(vanilla, geo, w).
         // Measured on the leaf-stripped motion-blocking surface; the slack
         // covers trunks, surface-rule blocks and snow sitting above it.
+        // Wet columns are covered by water_surface_* instead (the
+        // motion-blocking heightmap reports the water top, not the bed).
         for (ColumnReport r : reports) {
-            if (r.expected != GeoTile.NO_DATA) {
+            if (r.expected != GeoTile.NO_DATA && r.waterDepth == 0) {
                 pass &= check(String.format("blend_matches_field_%d_%d", r.x, r.z),
                         Math.abs(r.groundY - r.expected) <= 12);
+            }
+        }
+        // Phase 5: compiled water columns must actually hold water, with the
+        // surface at bed + depth (<= 1 block of rounding slack).
+        for (ColumnReport r : reports) {
+            if (r.waterDepth > 0 && r.weight >= 0.98 && delegate != null) {
+                pass &= check(String.format("water_surface_%d_%d", r.x, r.z),
+                        r.top.is(Blocks.WATER)
+                                && Math.abs(r.topY - (r.target + r.waterDepth)) <= 1);
             }
         }
         LOGGER.info("GEOWORLD-RESULT {}", pass ? "PASS" : "FAIL");
@@ -173,16 +194,19 @@ public final class TerrainSurveyScenario {
         int minY = level.getMinBuildHeight();
         int topY;
         int groundY;
+        int oceanY;
         BlockState top;
         int waterInTop24 = 0;
         List<String> topBlocks = new ArrayList<>();
         if (chunk == null) {
             topY = minY;
             groundY = minY;
+            oceanY = minY;
             top = Blocks.AIR.defaultBlockState();
         } else {
             topY = level.getHeight(Heightmap.Types.WORLD_SURFACE, x, z) - 1;
             groundY = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z) - 1;
+            oceanY = level.getHeight(Heightmap.Types.OCEAN_FLOOR, x, z) - 1;
             BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
             top = level.getBlockState(pos.set(x, topY, z));
             for (int y = topY; y > topY - 24 && y > minY; y--) {
@@ -198,6 +222,7 @@ public final class TerrainSurveyScenario {
 
         int target = GeoTile.NO_DATA;
         double weight = 0.0;
+        int waterDepth = 0;
         GeoTile tile = dataset.tileAt(x, z).orElse(null);
         if (tile != null && tile.hasElevation()) {
             int lx = dataset.localCoord(x);
@@ -206,6 +231,7 @@ public final class TerrainSurveyScenario {
             if (tile.hasInfluence()) {
                 weight = tile.influenceWeight(lx, lz) / 255.0;
             }
+            waterDepth = tile.waterDepth(lx, lz);
         }
 
         int vanilla = GeoTile.NO_DATA;
@@ -217,10 +243,10 @@ public final class TerrainSurveyScenario {
             }
         }
 
-        LOGGER.info("GEOWORLD-SURVEY x={} z={} topY={} ground={} top={} waterInTop24={} target={} w={} vanilla={} expected={} blocks={}",
-                x, z, topY, groundY, top.getBlock(), waterInTop24, target,
-                String.format("%.2f", weight), vanilla, expected, topBlocks);
-        return new ColumnReport(x, z, topY, groundY, top, waterInTop24, target, weight,
-                vanilla, expected, topBlocks);
+        LOGGER.info("GEOWORLD-SURVEY x={} z={} topY={} ground={} ocean={} top={} waterInTop24={} target={} w={} wd={} vanilla={} expected={} blocks={}",
+                x, z, topY, groundY, oceanY, top.getBlock(), waterInTop24, target,
+                String.format("%.2f", weight), waterDepth, vanilla, expected, topBlocks);
+        return new ColumnReport(x, z, topY, groundY, oceanY, top, waterInTop24, target,
+                weight, waterDepth, vanilla, expected, topBlocks);
     }
 }

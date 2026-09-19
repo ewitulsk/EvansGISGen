@@ -4,10 +4,11 @@ The Java GeoTileTest asserts these exact values, proving the binary format
 round-trips between the Python writer and the Java reader.
 
 Pattern (i = local_z * 256 + local_x):
-    elevation[i] = (i * 7) % 500 - 250          (int16)
-    influence[i] = i % 256                      (u8)
-    surface[i]   = i % 17                       (u8)
-    water bit i  = set iff i % 3 == 0
+    elevation[i]    = (i * 7) % 500 - 250       (int16)
+    influence[i]    = i % 256                   (u8)
+    surface[i]      = i % 17                    (u8)
+    water bit i     = set iff i % 3 == 0
+    water_depth[i]  = i % 5                     (u8)
 """
 
 from __future__ import annotations
@@ -23,6 +24,8 @@ def write_fixture(path: str | Path) -> Path:
     influence = bytes(i % 256 for i in range(n))
     surface = bytes(i % 17 for i in range(n))
     water = pack_bitset([1 if i % 3 == 0 else 0 for i in range(n)])
+    water_depth = bytes(i % 5 for i in range(n))
     return write_tile(path, 0, 0,
                       {"elevation": elevation, "influence": influence,
-                       "surface": surface, "water": water})
+                       "surface": surface, "water": water,
+                       "water_depth": water_depth})

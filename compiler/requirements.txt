@@ -5,6 +5,9 @@ pyproj>=3.6
 rasterio>=1.3
 numpy>=1.26
 
+# Phase 5+: hydrology rasterization (distance transforms for channel depth).
+scipy>=1.14
+
 # Tests.
 pytest>=8.0
 

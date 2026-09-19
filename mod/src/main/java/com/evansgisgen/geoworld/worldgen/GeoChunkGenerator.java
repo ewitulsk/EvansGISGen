@@ -59,6 +59,7 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
 
     private static final BlockState FILL_BLOCK = Blocks.STONE.defaultBlockState();
     private static final BlockState AIR = Blocks.AIR.defaultBlockState();
+    private static final BlockState WATER = Blocks.WATER.defaultBlockState();
 
     private final NoiseBasedChunkGenerator delegate;
     private final GeoDataset dataset;
@@ -116,7 +117,13 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
         return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
     }
 
-    private record GeoTarget(int height, double weight) {}
+    /**
+     * Geographic column target: {@code height} is the solid-surface Y (the
+     * riverbed at wet columns — the compiler bakes the channel into the
+     * elevation layer), {@code waterDepth} is the compiled water column depth
+     * in blocks above the bed (0 = dry).
+     */
+    private record GeoTarget(int height, double weight, int waterDepth) {}
 
     /**
      * Resolves the geographic target for a column: tile elevation + influence
@@ -134,17 +141,25 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
                 return null;
             }
             double w = dataset.influence(x, z);
-            return w <= 0.0 ? null : new GeoTarget(height, w);
+            return w <= 0.0 ? null : new GeoTarget(height, w, tile.waterDepth(lx, lz));
         }
         double w = circleInfluence(x, z);
-        return w <= 0.0 ? null : new GeoTarget(TARGET_HEIGHT, w);
+        return w <= 0.0 ? null : new GeoTarget(TARGET_HEIGHT, w, 0);
     }
 
-    private int deformedHeight(int x, int z, int vanillaHeight) {
+    private int deformedHeight(int x, int z, int vanillaHeight, Heightmap.Types type) {
         GeoTarget target = geoTarget(x, z);
-        return target == null
-                ? vanillaHeight
-                : (int) Math.round(Mth.lerp(target.weight(), vanillaHeight, target.height()));
+        if (target == null) {
+            return vanillaHeight;
+        }
+        int h = (int) Math.round(Mth.lerp(target.weight(), vanillaHeight, target.height()));
+        // Heightmap types that count fluids (WORLD_SURFACE, MOTION_BLOCKING*)
+        // report the water surface on wet columns; OCEAN_FLOOR* report the bed.
+        if (target.waterDepth() > 0 && type != Heightmap.Types.OCEAN_FLOOR
+                && type != Heightmap.Types.OCEAN_FLOOR_WG) {
+            h += target.waterDepth();
+        }
+        return h;
     }
 
     /**
@@ -221,6 +236,20 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
                     if (state != column[y - minY]) {
                         chunk.setBlockState(pos.set(x, y, z), state, false);
                         modified = true;
+                    }
+                }
+
+                // Hydrology: the compiled elevation at wet columns is the
+                // channel bed; fill water bed+1 .. bed+depth so the river's
+                // cross-section comes from the dataset, not the DEM.
+                int depth = target.waterDepth();
+                if (depth > 0) {
+                    int bed = surface + delta;
+                    for (int y = bed + 1; y <= bed + depth && y <= topY; y++) {
+                        if (!chunk.getBlockState(pos.set(x, y, z)).is(Blocks.WATER)) {
+                            chunk.setBlockState(pos.set(x, y, z), WATER, false);
+                            modified = true;
+                        }
                     }
                 }
             }
@@ -309,7 +338,7 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
 
     @Override
     public int getBaseHeight(int x, int z, Heightmap.Types type, LevelHeightAccessor level, RandomState random) {
-        return deformedHeight(x, z, vanillaBaseline(x, z, type, level, random));
+        return deformedHeight(x, z, vanillaBaseline(x, z, type, level, random), type);
     }
 
     @Override
@@ -350,6 +379,14 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
             }
             shifted[y - minY] = state;
         }
+        int depth = target.waterDepth();
+        if (depth > 0) {
+            int bed = surface + delta;
+            for (int y = bed + 1; y <= bed + depth && y <= topY; y++) {
+                shifted[y - minY] = WATER;
+            }
+            changed = true;
+        }
         return changed ? new NoiseColumn(minY, shifted) : column;
     }
 
@@ -357,7 +394,8 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
     public int getFirstOccupiedHeight(int x, int z, Heightmap.Types types, LevelHeightAccessor level, RandomState random) {
         return deformedHeight(x, z,
                 delegate.getFirstOccupiedHeight(x, z,
-                        geoTarget(x, z) == null ? types : Heightmap.Types.OCEAN_FLOOR, level, random));
+                        geoTarget(x, z) == null ? types : Heightmap.Types.OCEAN_FLOOR, level, random),
+                types);
     }
 
     @Override

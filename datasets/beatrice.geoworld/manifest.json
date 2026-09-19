@@ -23,7 +23,9 @@
   },
   "layers": [
     "elevation",
-    "influence"
+    "influence",
+    "water",
+    "water_depth"
   ],
   "tile_count": 1024,
   "bounds": {
