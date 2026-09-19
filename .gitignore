@@ -34,3 +34,6 @@ out/
 
 # Compiler debug previews (regenerate via `geoworld_compiler preview`)
 datasets/*/debug/
+
+# Scripted test run artifacts
+artifacts/

@@ -2,7 +2,7 @@ package com.evansgisgen.geoworld.worldgen;
 
 import com.mojang.serialization.MapCodec;
 import com.mojang.serialization.codecs.RecordCodecBuilder;
-import net.minecraft.world.level.chunk.ChunkGenerator;
+import net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator;
 
 /**
  * Serialized form of {@link GeoChunkGenerator}: wraps an arbitrary vanilla
@@ -24,6 +24,6 @@ public final class GeoChunkGeneratorCodec {
 
     public static final MapCodec<GeoChunkGenerator> INSTANCE = RecordCodecBuilder.mapCodec(instance ->
             instance.group(
-                    ChunkGenerator.CODEC.fieldOf("delegate").forGetter(GeoChunkGenerator::delegate)
+                    NoiseBasedChunkGenerator.CODEC.fieldOf("delegate").forGetter(GeoChunkGenerator::delegate)
             ).apply(instance, GeoChunkGenerator::new));
 }

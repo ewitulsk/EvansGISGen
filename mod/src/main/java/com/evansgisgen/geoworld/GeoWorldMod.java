@@ -43,6 +43,10 @@ public final class GeoWorldMod {
         }
         CHUNK_GENERATORS.register(modEventBus);
         NeoForge.EVENT_BUS.addListener(GeoWorldCommands::register);
+        if (com.evansgisgen.geoworld.testing.TerrainSurveyScenario.enabled()) {
+            new com.evansgisgen.geoworld.testing.TerrainSurveyScenario().register();
+            LOGGER.info("GeoWorld test scenario 'terrain_survey' armed");
+        }
     }
 
     public static GeoDataset dataset() {

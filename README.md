@@ -41,6 +41,27 @@ dataset). See [PLAN.md](PLAN.md) for the full implementation plan.
 - Debug commands: `/geoworld info`, `/geoworld geo`,
   `/geoworld geo <east> <north>`.
 
+## Scripted in-game tests
+
+Modeled on the scripted-run framework used by the Planetary Sable project:
+a PowerShell launcher creates a project-owned dedicated server (no desktop
+input, no user instance), generates a world with `level-type=geoworld:geoworld`,
+and the mod's `terrain_survey` scenario (`-Dgeoworld.serverScenario`) force-
+generates sample columns, dumps `GEOWORLD-SURVEY` evidence, evaluates
+`GEOWORLD-ASSERT` checks (heights match dataset, no water on the geographic
+surface, vanilla untouched outside coverage), prints `GEOWORLD-RESULT`, and
+halts.
+
+```
+./scripts/Test-Terrain.ps1              # full run, asserts must pass
+./scripts/Test-Terrain.ps1 -LevelType minecraft:normal -Tag control
+                                        # vanilla control run for comparison
+./scripts/Test-Terrain.ps1 -Seed <n>    # pin the world seed
+```
+
+Each run writes `artifacts/terrain-<timestamp>/` with the server log,
+result.json assertion ledger, and the generated world.
+
 ## Trying it
 
 ```

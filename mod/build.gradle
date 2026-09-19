@@ -46,6 +46,14 @@ neoForge {
             server()
             programArgument '--nogui'
             systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+            // Scripted runs (scripts/Test-*.ps1) override the run dir and arm a
+            // headless test scenario via -PgeoworldServerRunDir / -PgeoworldServerScenario.
+            if (providers.gradleProperty('geoworldServerRunDir').isPresent()) {
+                gameDirectory = file(providers.gradleProperty('geoworldServerRunDir').get())
+            }
+            if (providers.gradleProperty('geoworldServerScenario').isPresent()) {
+                systemProperty 'geoworld.serverScenario', providers.gradleProperty('geoworldServerScenario').get()
+            }
         }
 
         // This run config launches GameTestServer and runs all registered gametests, then exits.
@@ -142,19 +150,33 @@ sourceSets.main.resources.srcDir generateModMetadata
 neoForge.ideSyncTask generateModMetadata
 
 // Copies compiled .geoworld datasets into the run game directory so dev runs
-// pick them up via the "dataset_path" config entry (default geoworld/synthetic.geoworld).
+// pick them up via the "dataset_path" config entry (default geoworld/beatrice.geoworld).
+// Config-cache safe: all Gradle calls happen at configuration time; the doLast
+// uses plain file IO. Only *.geoworld dirs are copied (never datasets/raw).
 tasks.register('copyDatasets', Copy) {
-    from("${rootDir}/datasets") {
-        include '*/**'
+    def datasetsDir = file("${rootDir}/datasets")
+    def runDir = providers.gradleProperty('geoworldServerRunDir')
+            .map { file(it) }
+            .orElse(file("${rootDir}/run"))
+            .get()
+    def runGeo = new File(runDir, 'geoworld')
+    from(datasetsDir) {
+        include '*.geoworld/**'
+        exclude '*/debug/**'
     }
     into layout.buildDirectory.dir('runAssets/geoworld')
-    // Also copy into the dev run dir if it already exists.
+    // Also copy into the active run dir (dev run/ or a scripted test dir).
     doLast {
-        def runGeo = file("${rootDir}/run/geoworld")
         if (runGeo.isDirectory() || runGeo.mkdirs()) {
-            copy {
-                from("${rootDir}/datasets") { include '*/**' }
-                into runGeo
+            datasetsDir.eachDir { datasetDir ->
+                if (!datasetDir.name.endsWith('.geoworld')) return
+                datasetDir.eachFileRecurse { f ->
+                    if (f.isDirectory() || f.path.contains("${File.separator}debug${File.separator}")) return
+                    def rel = datasetDir.toPath().relativize(f.toPath()).toString()
+                    def dest = new File(new File(runGeo, datasetDir.name), rel)
+                    dest.parentFile.mkdirs()
+                    dest.bytes = f.bytes
+                }
             }
         }
     }

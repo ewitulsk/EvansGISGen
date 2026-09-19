@@ -31,6 +31,7 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.level.chunk.ChunkGenerator;
+import net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator;
 import net.minecraft.world.level.chunk.ChunkGeneratorStructureState;
 import net.minecraft.world.level.levelgen.GenerationStep;
 import net.minecraft.world.level.levelgen.Heightmap;
@@ -51,7 +52,7 @@ import org.jetbrains.annotations.Nullable;
  * fully flattened within {@link #FULL_RADIUS} and smoothly blended to vanilla
  * at the rim. All other behavior is delegated to the wrapped generator.
  */
-public final class GeoChunkGenerator extends ChunkGenerator {
+public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
     private static final double FULL_RADIUS = 400.0;
     private static final double EDGE_RADIUS = 500.0;
     private static final int TARGET_HEIGHT = 70;
@@ -59,20 +60,25 @@ public final class GeoChunkGenerator extends ChunkGenerator {
     private static final BlockState FILL_BLOCK = Blocks.STONE.defaultBlockState();
     private static final BlockState AIR = Blocks.AIR.defaultBlockState();
 
-    private final ChunkGenerator delegate;
+    private final NoiseBasedChunkGenerator delegate;
     private final GeoDataset dataset;
 
-    public GeoChunkGenerator(ChunkGenerator delegate) {
+    public GeoChunkGenerator(NoiseBasedChunkGenerator delegate) {
         this(delegate, GeoWorldMod.dataset());
     }
 
-    public GeoChunkGenerator(ChunkGenerator delegate, GeoDataset dataset) {
-        super(delegate.getBiomeSource());
+    public GeoChunkGenerator(NoiseBasedChunkGenerator delegate, GeoDataset dataset) {
+        // Extending NoiseBasedChunkGenerator (not ChunkGenerator) is load-bearing:
+        // ChunkMap creates the level's RandomState from the generator's noise
+        // settings guarded by `instanceof NoiseBasedChunkGenerator`, falling back
+        // to NoiseGeneratorSettings.dummy() otherwise — which produces an
+        // empty noise router and an all-water world.
+        super(delegate.getBiomeSource(), delegate.generatorSettings());
         this.delegate = delegate;
         this.dataset = dataset;
     }
 
-    public ChunkGenerator delegate() {
+    public NoiseBasedChunkGenerator delegate() {
         return delegate;
     }
 
@@ -142,6 +148,16 @@ public final class GeoChunkGenerator extends ChunkGenerator {
     }
 
     /**
+     * Vanilla baseline for deformed columns, measured against the solid
+     * surface ({@link Heightmap.Types#OCEAN_FLOOR}) since deformation strips
+     * vanilla surface water.
+     */
+    private int vanillaBaseline(int x, int z, Heightmap.Types type, LevelHeightAccessor level, RandomState random) {
+        return delegate.getBaseHeight(
+                x, z, geoTarget(x, z) == null ? type : Heightmap.Types.OCEAN_FLOOR, level, random);
+    }
+
+    /**
      * Vertically shifts every column in the chunk by the difference between its
      * vanilla surface height and the deformed target height, preserving the
      * column's internal structure (strata, caves) rather than rebuilding it.
@@ -182,9 +198,6 @@ public final class GeoChunkGenerator extends ChunkGenerator {
 
                 int surface = surfaceHeight(chunk, pos, x, z, minY, topY);
                 int delta = (int) Math.round(Mth.lerp(target.weight(), surface, target.height())) - surface;
-                if (delta == 0) {
-                    continue;
-                }
 
                 for (int i = 0; i < height; i++) {
                     column[i] = chunk.getBlockState(pos.set(x, minY + i, z));
@@ -198,6 +211,12 @@ public final class GeoChunkGenerator extends ChunkGenerator {
                         state = AIR;
                     } else {
                         state = column[srcY - minY];
+                        // Vanilla surface water (oceans, lakes, ponds) must not
+                        // ride the shift onto the geographic surface; cave and
+                        // aquifer water at/below the solid surface is preserved.
+                        if (srcY > surface) {
+                            state = stripFluid(state);
+                        }
                     }
                     if (state != column[y - minY]) {
                         chunk.setBlockState(pos.set(x, y, z), state, false);
@@ -212,9 +231,15 @@ public final class GeoChunkGenerator extends ChunkGenerator {
         }
     }
 
+    private static BlockState stripFluid(BlockState state) {
+        return state.getFluidState().isEmpty() ? state : AIR;
+    }
+
+    /** Topmost non-air, non-fluid block — the solid ground deformation measures against. */
     private static int surfaceHeight(ChunkAccess chunk, BlockPos.MutableBlockPos pos, int x, int z, int minY, int topY) {
         for (int y = topY; y > minY; y--) {
-            if (!chunk.getBlockState(pos.set(x, y, z)).isAir()) {
+            BlockState state = chunk.getBlockState(pos.set(x, y, z));
+            if (!state.isAir() && state.getFluidState().isEmpty()) {
                 return y;
             }
         }
@@ -284,7 +309,7 @@ public final class GeoChunkGenerator extends ChunkGenerator {
 
     @Override
     public int getBaseHeight(int x, int z, Heightmap.Types type, LevelHeightAccessor level, RandomState random) {
-        return deformedHeight(x, z, delegate.getBaseHeight(x, z, type, level, random));
+        return deformedHeight(x, z, vanillaBaseline(x, z, type, level, random));
     }
 
     @Override
@@ -297,30 +322,42 @@ public final class GeoChunkGenerator extends ChunkGenerator {
         int minY = getMinY();
         int topY = minY + getGenDepth() - 1;
         int surface = topY;
-        while (surface > minY && column.getBlock(surface).isAir()) {
+        while (surface > minY) {
+            BlockState s = column.getBlock(surface);
+            if (!s.isAir() && s.getFluidState().isEmpty()) {
+                break;
+            }
             surface--;
         }
         int delta = (int) Math.round(Mth.lerp(target.weight(), surface, target.height())) - surface;
-        if (delta == 0) {
-            return column;
-        }
+        boolean changed = delta != 0;
         BlockState[] shifted = new BlockState[getGenDepth()];
         for (int y = minY; y <= topY; y++) {
             int srcY = y - delta;
+            BlockState state;
             if (srcY < minY) {
-                shifted[y - minY] = FILL_BLOCK;
+                state = FILL_BLOCK;
             } else if (srcY > topY) {
-                shifted[y - minY] = AIR;
+                state = AIR;
             } else {
-                shifted[y - minY] = column.getBlock(srcY);
+                state = column.getBlock(srcY);
+                if (srcY > surface) {
+                    state = stripFluid(state);
+                }
             }
+            if (state != column.getBlock(y)) {
+                changed = true;
+            }
+            shifted[y - minY] = state;
         }
-        return new NoiseColumn(minY, shifted);
+        return changed ? new NoiseColumn(minY, shifted) : column;
     }
 
     @Override
     public int getFirstOccupiedHeight(int x, int z, Heightmap.Types types, LevelHeightAccessor level, RandomState random) {
-        return deformedHeight(x, z, delegate.getFirstOccupiedHeight(x, z, types, level, random));
+        return deformedHeight(x, z,
+                delegate.getFirstOccupiedHeight(x, z,
+                        geoTarget(x, z) == null ? types : Heightmap.Types.OCEAN_FLOOR, level, random));
     }
 
     @Override
