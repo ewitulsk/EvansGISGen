@@ -25,7 +25,8 @@
     "elevation",
     "influence",
     "water",
-    "water_depth"
+    "water_depth",
+    "road"
   ],
   "tile_count": 1024,
   "bounds": {

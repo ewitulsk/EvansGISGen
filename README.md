@@ -13,7 +13,7 @@ dataset). See [PLAN.md](PLAN.md) for the full implementation plan.
 └── format/     # dataset format spec
 ```
 
-## Current status: Phase 5
+## Current status: Phase 6
 
 - `GeoChunkGenerator` wraps a vanilla `ChunkGenerator` (`geoworld:geoworld`)
   and delegates everything to it, then deforms terrain from geographic data:
@@ -45,9 +45,18 @@ dataset). See [PLAN.md](PLAN.md) for the full implementation plan.
   Big Blue River is a real channel — not a DEM artifact. Vanilla surface
   water (ponds, seas) above the deformed surface is stripped; aquifer/cave
   water below it survives.
+- Roads (Phase 6): `fetch-roads` pulls OSM `highway` ways via Overpass;
+  `roads.py` rasterizes them into a per-cell road-class field — each highway
+  class contributes a cross-section (travel lanes, curb, sidewalk or shoulder,
+  track, center marking for multi-lane roads) painted by priority so
+  intersections resolve deterministically. The runtime paves the top blocks
+  of road columns before vanilla decoration (so vegetation can't plant on
+  pavement) and strips decoration output — snow cover, intruding tree
+  trunks/canopies — back off the surface afterwards. Water cells stay
+  unpaved until bridges exist.
 - `geoworld_compiler` (Python) writes the format: `manifest.json` + 256x256
   tiles with zlib-compressed sections (elevation int16, influence u8,
-  surface/road u8, water bitset). `dem.py` mosaics + reprojects real elevation
+  surface/road u8, water bitset, water depth u8). `dem.py` mosaics + reprojects real elevation
   rasters (rasterio/pyproj) onto the geo meter grid; `fetch.py` downloads
   USGS 3DEP 1 m DEM tiles from The National Map.
 - `datasets/beatrice.geoworld` is real USGS 1 m LiDAR terrain for downtown

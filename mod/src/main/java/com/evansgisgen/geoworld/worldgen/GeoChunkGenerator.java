@@ -61,6 +61,28 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
     private static final BlockState AIR = Blocks.AIR.defaultBlockState();
     private static final BlockState WATER = Blocks.WATER.defaultBlockState();
 
+    // Road surface class ids — shared with the compiler (roads.py).
+    static final int ROAD_NONE = 0;
+    static final int ROAD_ASPHALT = 1;
+    static final int ROAD_CURB = 2;
+    static final int ROAD_SIDEWALK = 3;
+    static final int ROAD_SHOULDER = 4;
+    static final int ROAD_TRACK = 5;
+    static final int ROAD_MARKING = 6;
+
+    /** Block each road surface class renders as (theme hook for Phase 7). */
+    public static BlockState roadBlock(int roadClass) {
+        return switch (roadClass) {
+            case ROAD_ASPHALT -> Blocks.GRAY_CONCRETE.defaultBlockState();
+            case ROAD_CURB -> Blocks.SMOOTH_STONE.defaultBlockState();
+            case ROAD_SIDEWALK -> Blocks.LIGHT_GRAY_CONCRETE.defaultBlockState();
+            case ROAD_SHOULDER -> Blocks.GRAVEL.defaultBlockState();
+            case ROAD_TRACK -> Blocks.DIRT_PATH.defaultBlockState();
+            case ROAD_MARKING -> Blocks.YELLOW_CONCRETE.defaultBlockState();
+            default -> AIR;
+        };
+    }
+
     private final NoiseBasedChunkGenerator delegate;
     private final GeoDataset dataset;
 
@@ -303,7 +325,140 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
 
     @Override
     public void applyBiomeDecoration(WorldGenLevel level, ChunkAccess chunk, StructureManager structureManager) {
+        // Roads are paved before vanilla decoration: trees, flowers and
+        // grass patches require dirt-like ground and cannot plant on
+        // pavement, so road cells stay clear automatically.
+        paveRoads(chunk);
         delegate.applyBiomeDecoration(level, chunk, structureManager);
+        // Decoration can still deposit cover (snow layers) on pavement, and
+        // already-decorated neighbors may have grown trees into road cells
+        // before paving ran — clear anything that isn't terrain.
+        clearRoadCover(chunk);
+    }
+
+    /**
+     * Replaces the top solid blocks of every compiled road column with the
+     * class's surface block. The DEM already holds the pavement elevation,
+     * so no carving is needed. Water columns are skipped — bridges are a
+     * later stage.
+     */
+    private void paveRoads(ChunkAccess chunk) {
+        if (dataset.isEmpty()) {
+            return;
+        }
+        ChunkPos chunkPos = chunk.getPos();
+        // Chunks never straddle tiles (256 % 16 == 0), so one lookup covers
+        // the whole chunk.
+        GeoTile tile = dataset.tileAt(chunkPos.getMinBlockX(), chunkPos.getMinBlockZ()).orElse(null);
+        if (tile == null || !tile.hasRoad()) {
+            return;
+        }
+
+        int minY = getMinY();
+        int topY = minY + getGenDepth() - 1;
+        BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+        boolean modified = false;
+
+        for (int lx = 0; lx < 16; lx++) {
+            for (int lz = 0; lz < 16; lz++) {
+                int x = chunkPos.getBlockX(lx);
+                int z = chunkPos.getBlockZ(lz);
+                int tlx = dataset.localCoord(x);
+                int tlz = dataset.localCoord(z);
+                int road = tile.roadClass(tlx, tlz);
+                if (road == ROAD_NONE) {
+                    continue;
+                }
+                if (tile.waterDepth(tlx, tlz) > 0) {
+                    continue;  // bridges are a later stage
+                }
+                int surface = groundHeight(chunk, pos, x, z, minY, topY);
+                if (surface <= minY) {
+                    continue;
+                }
+                BlockState roadBlock = roadBlock(road);
+                for (int y = surface; y > surface - 3 && y > minY; y--) {
+                    BlockState cur = chunk.getBlockState(pos.set(x, y, z));
+                    if (!cur.isAir() && cur.getFluidState().isEmpty() && cur != roadBlock) {
+                        chunk.setBlockState(pos.set(x, y, z), roadBlock, false);
+                        modified = true;
+                    }
+                }
+            }
+        }
+
+        if (modified) {
+            Heightmap.primeHeightmaps(chunk, EnumSet.allOf(Heightmap.Types.class));
+        }
+    }
+
+    /**
+     * Removes decoration output sitting above paved cells: snow layers and
+     * other replaceable cover deposited by the freeze step, plus trunk/leaf
+     * intrusions written by neighbors that decorated before this chunk paved.
+     * Only vegetation/cover is stripped — terrain overhangs are left alone.
+     */
+    private void clearRoadCover(ChunkAccess chunk) {
+        if (dataset.isEmpty()) {
+            return;
+        }
+        ChunkPos chunkPos = chunk.getPos();
+        GeoTile tile = dataset.tileAt(chunkPos.getMinBlockX(), chunkPos.getMinBlockZ()).orElse(null);
+        if (tile == null || !tile.hasRoad()) {
+            return;
+        }
+
+        int minY = getMinY();
+        int topY = minY + getGenDepth() - 1;
+        BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+        boolean modified = false;
+
+        for (int lx = 0; lx < 16; lx++) {
+            for (int lz = 0; lz < 16; lz++) {
+                int x = chunkPos.getBlockX(lx);
+                int z = chunkPos.getBlockZ(lz);
+                int tlx = dataset.localCoord(x);
+                int tlz = dataset.localCoord(z);
+                if (tile.roadClass(tlx, tlz) == ROAD_NONE
+                        || tile.waterDepth(tlx, tlz) > 0) {
+                    continue;
+                }
+                int surface = groundHeight(chunk, pos, x, z, minY, topY);
+                for (int y = surface + 1; y <= topY; y++) {
+                    BlockState cur = chunk.getBlockState(pos.set(x, y, z));
+                    if (isFeatureOverhang(cur)) {
+                        chunk.setBlockState(pos.set(x, y, z), AIR, false);
+                        modified = true;
+                    }
+                }
+            }
+        }
+
+        if (modified) {
+            Heightmap.primeHeightmaps(chunk, EnumSet.allOf(Heightmap.Types.class));
+        }
+    }
+
+    /** Blocks decoration writes above terrain: plants/cover, tree trunks, leaves. */
+    private static boolean isFeatureOverhang(BlockState state) {
+        return state.canBeReplaced()
+                || state.is(net.minecraft.tags.BlockTags.LEAVES)
+                || state.is(net.minecraft.tags.BlockTags.LOGS);
+    }
+
+    /**
+     * Topmost terrain block — like {@link #surfaceHeight} but skips
+     * decoration output (leaves, trunks, snow cover) so paving measures
+     * the ground, not a tree that grew into the column.
+     */
+    private static int groundHeight(ChunkAccess chunk, BlockPos.MutableBlockPos pos, int x, int z, int minY, int topY) {
+        for (int y = topY; y > minY; y--) {
+            BlockState state = chunk.getBlockState(pos.set(x, y, z));
+            if (!state.isAir() && state.getFluidState().isEmpty() && !isFeatureOverhang(state)) {
+                return y;
+            }
+        }
+        return minY;
     }
 
     @Override
@@ -386,6 +541,24 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
                 shifted[y - minY] = WATER;
             }
             changed = true;
+        }
+        // Road columns report the paved surface (same block swap paveRoads
+        // performs during decoration).
+        GeoTile roadTile = dataset.tileAt(x, z).orElse(null);
+        if (depth == 0 && roadTile != null && roadTile.hasRoad()) {
+            int road = roadTile.roadClass(dataset.localCoord(x), dataset.localCoord(z));
+            if (road != ROAD_NONE) {
+                BlockState roadBlock = roadBlock(road);
+                int bed = surface + delta;
+                for (int y = bed, paved = 0; y > minY && paved < 3; y--) {
+                    BlockState s = shifted[y - minY];
+                    if (!s.isAir() && s.getFluidState().isEmpty()) {
+                        shifted[y - minY] = roadBlock;
+                        paved++;
+                        changed = true;
+                    }
+                }
+            }
         }
         return changed ? new NoiseColumn(minY, shifted) : column;
     }

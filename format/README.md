@@ -95,6 +95,10 @@ Notes:
   than a height.
 - `influence` of 0 means "vanilla"; 255 means "fully geographic". The compiler
   precomputes the field so the runtime does no polygon distance math.
+- `road` class ids (Phase 6): `0` none, `1` asphalt, `2` curb, `3` sidewalk,
+  `4` shoulder, `5` track, `6` center-line marking. The compiler rasterizes
+  OSM highway cross-sections by priority (major roads overwrite minor), so
+  the runtime is a pure class→block lookup; `0` means "no road".
 - `water` is the footprint mask; `water_depth` (Phase 5) is the water column
   depth in blocks. At wet columns `elevation` holds the **channel bed** Y
   (the compiler bakes the riverbed into the elevation layer), and the runtime

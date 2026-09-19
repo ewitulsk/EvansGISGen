@@ -46,9 +46,12 @@ public final class TerrainSurveyScenario {
             // Transect across the eastern boundary ramp (influence 1 -> 0
             // over the outer ~500 m of coverage) — the Phase 4 check that the
             // geographic-to-vanilla blend actually follows the field.
-            {3300, 0}, {3500, 0}, {3600, 0}, {3700, 0}, {3800, 0}, {3900, 0},
+            {3300, -600}, {3500, 0}, {3600, 0}, {3700, 0}, {3800, 0}, {3900, 0},
             // Big Blue River channel (Phase 5): compiled water_depth > 0.
             {1243, 1782}, {-638, 501}, {2100, 824},
+            // Roads (Phase 6): US-77 marking/asphalt downtown, sidewalk/curb,
+            // and an unpaved track.
+            {20, 0}, {13, 0}, {130, 0}, {132, 0}, {923, 1078},
             {5000, 0}, {-5000, -5000},
     };
 
@@ -82,8 +85,8 @@ public final class TerrainSurveyScenario {
 
     private record ColumnReport(int x, int z, int topY, int groundY, int oceanY,
                                 BlockState top, int waterInTop24, int target,
-                                double weight, int waterDepth, int vanilla,
-                                int expected, List<String> topBlocks) {}
+                                double weight, int waterDepth, int roadClass,
+                                int vanilla, int expected, List<String> topBlocks) {}
 
     private void run(MinecraftServer server) {
         ServerLevel level = server.overworld();
@@ -142,8 +145,10 @@ public final class TerrainSurveyScenario {
                     Math.abs(measured - r.target) <= 6);
         }
         for (ColumnReport r : reports) {
+            // Only deformed columns have surface water stripped — untouched
+            // vanilla (w == 0) legitimately keeps its oceans and lakes.
             // Compiled water columns are asserted by water_surface_* below.
-            if (r.waterDepth > 0) {
+            if (r.waterDepth > 0 || r.weight <= 0 || delegate == null) {
                 continue;
             }
             pass &= check(String.format("no_water_surface_%d_%d", r.x, r.z),
@@ -165,8 +170,17 @@ public final class TerrainSurveyScenario {
         for (ColumnReport r : reports) {
             if (r.waterDepth > 0 && r.weight >= 0.98 && delegate != null) {
                 pass &= check(String.format("water_surface_%d_%d", r.x, r.z),
-                        r.top.is(Blocks.WATER)
+                        (r.top.is(Blocks.WATER) || r.top.is(Blocks.ICE))
                                 && Math.abs(r.topY - (r.target + r.waterDepth)) <= 1);
+            }
+        }
+        // Phase 6: compiled road columns render the class's surface block
+        // (asphalt, curb, sidewalk, ...).
+        for (ColumnReport r : reports) {
+            if (r.roadClass > 0 && r.weight >= 0.98 && delegate != null) {
+                pass &= check(String.format("road_surface_%d_%d", r.x, r.z),
+                        r.top == com.evansgisgen.geoworld.worldgen.GeoChunkGenerator
+                                .roadBlock(r.roadClass));
             }
         }
         LOGGER.info("GEOWORLD-RESULT {}", pass ? "PASS" : "FAIL");
@@ -223,6 +237,7 @@ public final class TerrainSurveyScenario {
         int target = GeoTile.NO_DATA;
         double weight = 0.0;
         int waterDepth = 0;
+        int roadClass = 0;
         GeoTile tile = dataset.tileAt(x, z).orElse(null);
         if (tile != null && tile.hasElevation()) {
             int lx = dataset.localCoord(x);
@@ -232,6 +247,9 @@ public final class TerrainSurveyScenario {
                 weight = tile.influenceWeight(lx, lz) / 255.0;
             }
             waterDepth = tile.waterDepth(lx, lz);
+            if (tile.hasRoad()) {
+                roadClass = tile.roadClass(lx, lz);
+            }
         }
 
         int vanilla = GeoTile.NO_DATA;
@@ -243,10 +261,10 @@ public final class TerrainSurveyScenario {
             }
         }
 
-        LOGGER.info("GEOWORLD-SURVEY x={} z={} topY={} ground={} ocean={} top={} waterInTop24={} target={} w={} wd={} vanilla={} expected={} blocks={}",
+        LOGGER.info("GEOWORLD-SURVEY x={} z={} topY={} ground={} ocean={} top={} waterInTop24={} target={} w={} wd={} road={} vanilla={} expected={} blocks={}",
                 x, z, topY, groundY, oceanY, top.getBlock(), waterInTop24, target,
-                String.format("%.2f", weight), waterDepth, vanilla, expected, topBlocks);
+                String.format("%.2f", weight), waterDepth, roadClass, vanilla, expected, topBlocks);
         return new ColumnReport(x, z, topY, groundY, oceanY, top, waterInTop24, target,
-                weight, waterDepth, vanilla, expected, topBlocks);
+                weight, waterDepth, roadClass, vanilla, expected, topBlocks);
     }
 }

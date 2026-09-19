@@ -47,6 +47,9 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--hydro", default=None,
                    help="OSM water JSON from fetch-water; adds channel depth "
                         "and carves riverbeds into the elevation layer")
+    b.add_argument("--roads", default=None,
+                   help="OSM highway JSON from fetch-roads; emits the road "
+                        "surface-class layer")
 
     fe = sub.add_parser("fetch", help="download DEM rasters from the USGS TNM API")
     fe.add_argument("--bbox", required=True,
@@ -59,6 +62,12 @@ def main(argv: list[str] | None = None) -> int:
     fw.add_argument("--bbox", required=True,
                     help="'minLon,minLat,maxLon,maxLat' in WGS84 degrees")
     fw.add_argument("--out", required=True, help="output JSON path")
+
+    fr = sub.add_parser("fetch-roads",
+                        help="download OSM highway ways (Overpass) as JSON")
+    fr.add_argument("--bbox", required=True,
+                    help="'minLon,minLat,maxLon,maxLat' in WGS84 degrees")
+    fr.add_argument("--out", required=True, help="output JSON path")
 
     f = sub.add_parser("fixture", help="write a known-pattern test tile")
     f.add_argument("--out", required=True, help="output .gwt path")
@@ -84,6 +93,14 @@ def main(argv: list[str] | None = None) -> int:
         min_lon, min_lat, max_lon, max_lat = (
             float(s) for s in args.bbox.split(","))
         print(fetch_water(min_lon, min_lat, max_lon, max_lat, args.out))
+        return 0
+
+    if args.command == "fetch-roads":
+        from .roads import fetch_roads
+
+        min_lon, min_lat, max_lon, max_lat = (
+            float(s) for s in args.bbox.split(","))
+        print(fetch_roads(min_lon, min_lat, max_lon, max_lat, args.out))
         return 0
 
     if args.command == "build":
@@ -126,17 +143,23 @@ def main(argv: list[str] | None = None) -> int:
             source = SyntheticSource(args.base_elevation, args.radius_full, args.radius_edge)
 
         hydro = None
-        if args.hydro:
+        roads = None
+        if args.hydro or args.roads:
             if projection is None:
-                parser.error("--hydro requires --anchor lat,lon")
-            from .hydro import HydroSource
+                parser.error("--hydro/--roads require --anchor lat,lon")
             from .tileio import TILE_SIZE
-
-            hydro = HydroSource(args.hydro, projection,
-                                extent_m=args.radius + TILE_SIZE)
+            if args.hydro:
+                from .hydro import HydroSource
+                hydro = HydroSource(args.hydro, projection,
+                                    extent_m=args.radius + TILE_SIZE)
+            if args.roads:
+                from .roads import RoadSource
+                roads = RoadSource(args.roads, projection,
+                                   extent_m=args.radius + TILE_SIZE)
 
         out = build_dataset(args.out, name=args.name, transform=transform,
-                            source=source, projection=projection, hydro=hydro)
+                            source=source, projection=projection,
+                            hydro=hydro, roads=roads)
         print(f"wrote dataset: {out}")
         return 0
 

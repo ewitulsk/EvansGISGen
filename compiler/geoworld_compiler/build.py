@@ -26,6 +26,12 @@ class Hydro(Protocol):
     def depth_m(self, east: float, north: float) -> float: ...
 
 
+class Roads(Protocol):
+    """Road surface-class provider in geo space (see roads.py)."""
+
+    def road_class(self, east: float, north: float) -> int: ...
+
+
 def build_dataset(
     out_dir: str | Path,
     *,
@@ -34,6 +40,7 @@ def build_dataset(
     source: Source,
     projection: Projection | None = None,
     hydro: Hydro | None = None,
+    roads: Roads | None = None,
 ) -> Path:
     """Emit a .geoworld dataset directory. Returns the dataset dir."""
     out = Path(out_dir)
@@ -49,14 +56,17 @@ def build_dataset(
 
     written: list[tuple[int, int]] = []
     any_water = False
+    any_road = False
     n = TILE_SIZE * TILE_SIZE
     for tx in range(t_min_x, t_max_x + 1):
         for tz in range(t_min_z, t_max_z + 1):
             elevation = [0] * n
             influence = bytearray(n)
             water_depth = bytearray(n)
+            road = bytearray(n)
             any_influence = False
             any_tile_water = False
+            any_tile_road = False
             for lz in range(TILE_SIZE):
                 bz = tz * TILE_SIZE + lz
                 north = transform.north_meters(bz)
@@ -85,6 +95,11 @@ def build_dataset(
                                     elevation[i] = bed_y
                                     water_depth[i] = min(255, depth_blocks)
                                     any_tile_water = True
+                    if roads is not None:
+                        rc = roads.road_class(east, north)
+                        if rc:
+                            road[i] = rc
+                            any_tile_road = True
                     influence[i] = min(255, max(0, int(w * 255.0 + 0.5)))
                     any_influence = any_influence or w > 0.0
             if any_influence:
@@ -93,13 +108,17 @@ def build_dataset(
                 if any_tile_water:
                     layers["water"] = pack_bitset([1 if d else 0 for d in water_depth])
                     layers["water_depth"] = bytes(water_depth)
+                if any_tile_road:
+                    layers["road"] = bytes(road)
                 write_tile(tiles_dir / tile_filename(tx, tz), tx, tz, layers)
                 written.append((tx, tz))
                 any_water = any_water or any_tile_water
+                any_road = any_road or any_tile_road
             print(f"  tile {tx:+d},{tz:+d}: {'written' if any_influence else 'skipped'}",
                   flush=True)
 
-    layers = ["elevation", "influence"] + (["water", "water_depth"] if any_water else [])
+    layers = ["elevation", "influence"] + (["water", "water_depth"] if any_water else []) \
+        + (["road"] if any_road else [])
     write_manifest(out, name=name, transform=transform, projection=projection,
                    layers=layers, tiles=written)
     return out
