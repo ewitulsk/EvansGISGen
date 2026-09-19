@@ -52,6 +52,10 @@ public final class TerrainSurveyScenario {
             // Roads (Phase 6): US-77 marking/asphalt downtown, sidewalk/curb,
             // and an unpaved track.
             {20, 0}, {13, 0}, {130, 0}, {132, 0}, {923, 1078},
+            // Land use (Phase 7): farmland, woods, rail corridor.
+            {6, 3522}, {660, 1179}, {0, 1638},
+            // Buildings (Phase 8): civic, commercial, residential downtown.
+            {62, 0}, {6, 143}, {114, 0},
             {5000, 0}, {-5000, -5000},
     };
 
@@ -84,8 +88,11 @@ public final class TerrainSurveyScenario {
     }
 
     private record ColumnReport(int x, int z, int topY, int groundY, int oceanY,
+                                int terrainY, BlockState terrainBlock,
                                 BlockState top, int waterInTop24, int target,
                                 double weight, int waterDepth, int roadClass,
+                                int surfaceClass, int buildingClass,
+                                int buildingLevels, String biome,
                                 int vanilla, int expected, List<String> topBlocks) {}
 
     private void run(MinecraftServer server) {
@@ -135,12 +142,16 @@ public final class TerrainSurveyScenario {
                 .toList();
         pass &= check("full_influence_samples_present", !fullInfluence.isEmpty());
         for (ColumnReport r : fullInfluence) {
-            // Ground (leaf-stripped motion-blocking top) is the terrain
-            // surface; topY can carry trees from a neighboring chunk's
-            // decoration, which is timing-dependent to observe. On wet
-            // columns the motion-blocking heightmap counts the water column,
-            // so measure the bed with OCEAN_FLOOR instead.
-            int measured = r.waterDepth > 0 ? r.oceanY : r.groundY;
+            // Terrain surface (vegetation-stripped) is the measure; topY can
+            // carry trees from a neighboring chunk's decoration, which is
+            // timing-dependent to observe. On wet columns the heightmaps
+            // count the water column, so measure the bed with OCEAN_FLOOR.
+            // Building shells legitimately rise above terrain — covered by
+            // building_shell_* instead.
+            if (r.buildingClass > 0) {
+                continue;
+            }
+            int measured = r.waterDepth > 0 ? r.oceanY : r.terrainY;
             pass &= check(String.format("height_matches_dataset_%d_%d", r.x, r.z),
                     Math.abs(measured - r.target) <= 6);
         }
@@ -160,9 +171,10 @@ public final class TerrainSurveyScenario {
         // Wet columns are covered by water_surface_* instead (the
         // motion-blocking heightmap reports the water top, not the bed).
         for (ColumnReport r : reports) {
-            if (r.expected != GeoTile.NO_DATA && r.waterDepth == 0) {
+            if (r.expected != GeoTile.NO_DATA && r.waterDepth == 0
+                    && r.buildingClass == 0) {
                 pass &= check(String.format("blend_matches_field_%d_%d", r.x, r.z),
-                        Math.abs(r.groundY - r.expected) <= 12);
+                        Math.abs(r.terrainY - r.expected) <= 12);
             }
         }
         // Phase 5: compiled water columns must actually hold water, with the
@@ -181,6 +193,41 @@ public final class TerrainSurveyScenario {
                 pass &= check(String.format("road_surface_%d_%d", r.x, r.z),
                         r.top == com.evansgisgen.geoworld.worldgen.GeoChunkGenerator
                                 .roadBlock(r.roadClass));
+            }
+        }
+        // Phase 7: classified land-use columns render the class's theme
+        // block at the terrain surface (roads/buildings/water own their
+        // cells, so they're skipped).
+        for (ColumnReport r : reports) {
+            if (r.surfaceClass > 0 && r.weight >= 0.98 && delegate != null
+                    && r.waterDepth == 0 && r.roadClass == 0
+                    && r.buildingClass == 0) {
+                BlockState expectedBlock =
+                        com.evansgisgen.geoworld.worldgen.GeoChunkGenerator
+                                .surfaceBlock(r.surfaceClass);
+                pass &= check(String.format("surface_class_%d_%d", r.x, r.z),
+                        expectedBlock != null && r.terrainBlock == expectedBlock);
+            }
+        }
+        // Phase 7: full-coverage columns live in the fixed plains biome —
+        // no jungle/frozen-river surprises.
+        for (ColumnReport r : reports) {
+            if (r.weight >= 0.98 && delegate != null) {
+                pass &= check(String.format("biome_plains_%d_%d", r.x, r.z),
+                        "minecraft:plains".equals(r.biome));
+            }
+        }
+        // Phase 8: building cells raise a shell — the top sits at least a
+        // storey above terrain and is a palette block (roof/wall/window).
+        for (ColumnReport r : reports) {
+            if (r.buildingClass > 0 && r.weight >= 0.98 && delegate != null
+                    && r.waterDepth == 0 && r.roadClass == 0) {
+                var palette = com.evansgisgen.geoworld.worldgen.GeoChunkGenerator
+                        .buildingPalette(r.buildingClass);
+                pass &= check(String.format("building_shell_%d_%d", r.x, r.z),
+                        palette != null && r.topY >= r.target + 4
+                                && (r.top == palette.roof() || r.top == palette.wall()
+                                        || r.top == palette.window()));
             }
         }
         LOGGER.info("GEOWORLD-RESULT {}", pass ? "PASS" : "FAIL");
@@ -212,6 +259,9 @@ public final class TerrainSurveyScenario {
         BlockState top;
         int waterInTop24 = 0;
         List<String> topBlocks = new ArrayList<>();
+        int terrainY = minY;
+        BlockState terrainBlock = Blocks.AIR.defaultBlockState();
+        String biome = "?";
         if (chunk == null) {
             topY = minY;
             groundY = minY;
@@ -232,12 +282,29 @@ public final class TerrainSurveyScenario {
                     topBlocks.add(y + "=" + s.getBlock().toString());
                 }
             }
+            // Terrain surface: same vegetation-skip as the generator's
+            // groundHeight — trees/plants above ground don't inflate it.
+            for (int y = topY; y > minY; y--) {
+                BlockState s = level.getBlockState(pos.set(x, y, z));
+                if (!s.isAir() && s.getFluidState().isEmpty()
+                        && !com.evansgisgen.geoworld.worldgen.GeoChunkGenerator
+                                .isFeatureOverhang(s)) {
+                    terrainY = y;
+                    terrainBlock = s;
+                    break;
+                }
+            }
+            biome = level.getBiome(pos.set(x, groundY, z)).unwrapKey()
+                    .map(k -> k.location().toString()).orElse("?");
         }
 
         int target = GeoTile.NO_DATA;
         double weight = 0.0;
         int waterDepth = 0;
         int roadClass = 0;
+        int surfaceClass = 0;
+        int buildingClass = 0;
+        int buildingLevels = 0;
         GeoTile tile = dataset.tileAt(x, z).orElse(null);
         if (tile != null && tile.hasElevation()) {
             int lx = dataset.localCoord(x);
@@ -247,9 +314,10 @@ public final class TerrainSurveyScenario {
                 weight = tile.influenceWeight(lx, lz) / 255.0;
             }
             waterDepth = tile.waterDepth(lx, lz);
-            if (tile.hasRoad()) {
-                roadClass = tile.roadClass(lx, lz);
-            }
+            roadClass = tile.roadClass(lx, lz);
+            surfaceClass = tile.surfaceClass(lx, lz);
+            buildingClass = tile.buildingClass(lx, lz);
+            buildingLevels = tile.buildingLevels(lx, lz);
         }
 
         int vanilla = GeoTile.NO_DATA;
@@ -261,10 +329,13 @@ public final class TerrainSurveyScenario {
             }
         }
 
-        LOGGER.info("GEOWORLD-SURVEY x={} z={} topY={} ground={} ocean={} top={} waterInTop24={} target={} w={} wd={} road={} vanilla={} expected={} blocks={}",
-                x, z, topY, groundY, oceanY, top.getBlock(), waterInTop24, target,
-                String.format("%.2f", weight), waterDepth, roadClass, vanilla, expected, topBlocks);
-        return new ColumnReport(x, z, topY, groundY, oceanY, top, waterInTop24, target,
-                weight, waterDepth, roadClass, vanilla, expected, topBlocks);
+        LOGGER.info("GEOWORLD-SURVEY x={} z={} topY={} ground={} ocean={} terrain={} top={} waterInTop24={} target={} w={} wd={} road={} surf={} bldg={}/{} biome={} vanilla={} expected={} blocks={}",
+                x, z, topY, groundY, oceanY, terrainY, top.getBlock(), waterInTop24, target,
+                String.format("%.2f", weight), waterDepth, roadClass, surfaceClass,
+                buildingClass, buildingLevels, biome, vanilla, expected, topBlocks);
+        return new ColumnReport(x, z, topY, groundY, oceanY, terrainY, terrainBlock,
+                top, waterInTop24, target, weight, waterDepth, roadClass,
+                surfaceClass, buildingClass, buildingLevels, biome,
+                vanilla, expected, topBlocks);
     }
 }

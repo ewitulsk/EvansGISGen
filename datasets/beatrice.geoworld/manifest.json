@@ -24,9 +24,12 @@
   "layers": [
     "elevation",
     "influence",
+    "surface",
     "water",
     "water_depth",
-    "road"
+    "road",
+    "building",
+    "building_levels"
   ],
   "tile_count": 1024,
   "bounds": {

@@ -31,6 +31,8 @@ public final class GeoTile {
     static final int LAYER_ROAD = 0x08;
     static final int LAYER_WATER = 0x10;
     static final int LAYER_WATER_DEPTH = 0x20;
+    static final int LAYER_BUILDING = 0x40;
+    static final int LAYER_BUILDING_LEVELS = 0x80;
 
     private final int tileX;
     private final int tileZ;
@@ -41,10 +43,13 @@ public final class GeoTile {
     @Nullable private final byte[] road;
     @Nullable private final byte[] waterBits;
     @Nullable private final byte[] waterDepth;
+    @Nullable private final byte[] building;
+    @Nullable private final byte[] buildingLevels;
 
     private GeoTile(int tileX, int tileZ, int tileSize, @Nullable short[] elevation,
             @Nullable byte[] influence, @Nullable byte[] surface, @Nullable byte[] road,
-            @Nullable byte[] waterBits, @Nullable byte[] waterDepth) {
+            @Nullable byte[] waterBits, @Nullable byte[] waterDepth,
+            @Nullable byte[] building, @Nullable byte[] buildingLevels) {
         this.tileX = tileX;
         this.tileZ = tileZ;
         this.tileSize = tileSize;
@@ -54,6 +59,8 @@ public final class GeoTile {
         this.road = road;
         this.waterBits = waterBits;
         this.waterDepth = waterDepth;
+        this.building = building;
+        this.buildingLevels = buildingLevels;
     }
 
     public static GeoTile read(Path file, int tileSize) throws IOException {
@@ -80,8 +87,10 @@ public final class GeoTile {
         byte[] road = null;
         byte[] water = null;
         byte[] waterDepth = null;
+        byte[] building = null;
+        byte[] buildingLevels = null;
 
-        for (int bit = 1; bit <= 0x20; bit <<= 1) {
+        for (int bit = 1; bit <= 0x80; bit <<= 1) {
             if ((mask & bit) == 0) {
                 continue;
             }
@@ -101,11 +110,13 @@ public final class GeoTile {
                 case LAYER_ROAD -> road = payload;
                 case LAYER_WATER -> water = payload;
                 case LAYER_WATER_DEPTH -> waterDepth = payload;
+                case LAYER_BUILDING -> building = payload;
+                case LAYER_BUILDING_LEVELS -> buildingLevels = payload;
                 default -> { /* unknown bit, already skipped by mask check */ }
             }
         }
         return new GeoTile(tileX, tileZ, tileSize, elevation, influence, surface, road,
-                water, waterDepth);
+                water, waterDepth, building, buildingLevels);
     }
 
     private static byte[] decompress(int codec, byte[] stored, int rawLen) throws IOException {
@@ -169,16 +180,18 @@ public final class GeoTile {
         return surface != null;
     }
 
+    /** Surface class id for this column (0 = unclassified/none present). */
     public int surfaceClass(int localX, int localZ) {
-        return surface[idx(localX, localZ)] & 0xFF;
+        return surface == null ? 0 : surface[idx(localX, localZ)] & 0xFF;
     }
 
     public boolean hasRoad() {
         return road != null;
     }
 
+    /** Road class id for this column (0 = no road/none present). */
     public int roadClass(int localX, int localZ) {
-        return road[idx(localX, localZ)] & 0xFF;
+        return road == null ? 0 : road[idx(localX, localZ)] & 0xFF;
     }
 
     public boolean hasWater() {
@@ -205,5 +218,19 @@ public final class GeoTile {
      */
     public int waterDepth(int localX, int localZ) {
         return waterDepth == null ? 0 : waterDepth[idx(localX, localZ)] & 0xFF;
+    }
+
+    public boolean hasBuilding() {
+        return building != null;
+    }
+
+    /** Building class id for this column (0 = no footprint). */
+    public int buildingClass(int localX, int localZ) {
+        return building == null ? 0 : building[idx(localX, localZ)] & 0xFF;
+    }
+
+    /** Floor count for this column (0 outside footprints). */
+    public int buildingLevels(int localX, int localZ) {
+        return buildingLevels == null ? 0 : buildingLevels[idx(localX, localZ)] & 0xFF;
     }
 }

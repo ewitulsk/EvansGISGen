@@ -32,6 +32,19 @@ class Roads(Protocol):
     def road_class(self, east: float, north: float) -> int: ...
 
 
+class Landuse(Protocol):
+    """Surface-class provider in geo space (see landuse.py)."""
+
+    def surface_class(self, east: float, north: float) -> int: ...
+
+
+class Buildings(Protocol):
+    """Building footprint provider in geo space (see buildings.py)."""
+
+    def building_class(self, east: float, north: float) -> int: ...
+    def building_levels(self, east: float, north: float) -> int: ...
+
+
 def build_dataset(
     out_dir: str | Path,
     *,
@@ -41,6 +54,8 @@ def build_dataset(
     projection: Projection | None = None,
     hydro: Hydro | None = None,
     roads: Roads | None = None,
+    landuse: Landuse | None = None,
+    buildings: Buildings | None = None,
 ) -> Path:
     """Emit a .geoworld dataset directory. Returns the dataset dir."""
     out = Path(out_dir)
@@ -57,16 +72,23 @@ def build_dataset(
     written: list[tuple[int, int]] = []
     any_water = False
     any_road = False
+    any_surface = False
+    any_building = False
     n = TILE_SIZE * TILE_SIZE
     for tx in range(t_min_x, t_max_x + 1):
         for tz in range(t_min_z, t_max_z + 1):
             elevation = [0] * n
             influence = bytearray(n)
+            surface = bytearray(n)
             water_depth = bytearray(n)
             road = bytearray(n)
+            building = bytearray(n)
+            b_levels = bytearray(n)
             any_influence = False
             any_tile_water = False
             any_tile_road = False
+            any_tile_surface = False
+            any_tile_building = False
             for lz in range(TILE_SIZE):
                 bz = tz * TILE_SIZE + lz
                 north = transform.north_meters(bz)
@@ -100,25 +122,46 @@ def build_dataset(
                         if rc:
                             road[i] = rc
                             any_tile_road = True
+                    if landuse is not None:
+                        sc = landuse.surface_class(east, north)
+                        if sc:
+                            surface[i] = sc
+                            any_tile_surface = True
+                    if buildings is not None:
+                        bc = buildings.building_class(east, north)
+                        if bc:
+                            building[i] = bc
+                            b_levels[i] = buildings.building_levels(east, north)
+                            any_tile_building = True
                     influence[i] = min(255, max(0, int(w * 255.0 + 0.5)))
                     any_influence = any_influence or w > 0.0
             if any_influence:
                 layers = {"elevation": pack_elevation(elevation),
                           "influence": bytes(influence)}
+                if any_tile_surface:
+                    layers["surface"] = bytes(surface)
                 if any_tile_water:
                     layers["water"] = pack_bitset([1 if d else 0 for d in water_depth])
                     layers["water_depth"] = bytes(water_depth)
                 if any_tile_road:
                     layers["road"] = bytes(road)
+                if any_tile_building:
+                    layers["building"] = bytes(building)
+                    layers["building_levels"] = bytes(b_levels)
                 write_tile(tiles_dir / tile_filename(tx, tz), tx, tz, layers)
                 written.append((tx, tz))
                 any_water = any_water or any_tile_water
                 any_road = any_road or any_tile_road
+                any_surface = any_surface or any_tile_surface
+                any_building = any_building or any_tile_building
             print(f"  tile {tx:+d},{tz:+d}: {'written' if any_influence else 'skipped'}",
                   flush=True)
 
-    layers = ["elevation", "influence"] + (["water", "water_depth"] if any_water else []) \
-        + (["road"] if any_road else [])
+    layers = (["elevation", "influence"]
+              + (["surface"] if any_surface else [])
+              + (["water", "water_depth"] if any_water else [])
+              + (["road"] if any_road else [])
+              + (["building", "building_levels"] if any_building else []))
     write_manifest(out, name=name, transform=transform, projection=projection,
                    layers=layers, tiles=written)
     return out

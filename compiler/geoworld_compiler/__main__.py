@@ -50,6 +50,12 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--roads", default=None,
                    help="OSM highway JSON from fetch-roads; emits the road "
                         "surface-class layer")
+    b.add_argument("--landuse", default=None,
+                   help="OSM land-use JSON from fetch-landuse; emits the "
+                        "surface class layer")
+    b.add_argument("--buildings", default=None,
+                   help="OSM building JSON from fetch-buildings; emits the "
+                        "building class/levels layers")
 
     fe = sub.add_parser("fetch", help="download DEM rasters from the USGS TNM API")
     fe.add_argument("--bbox", required=True,
@@ -68,6 +74,18 @@ def main(argv: list[str] | None = None) -> int:
     fr.add_argument("--bbox", required=True,
                     help="'minLon,minLat,maxLon,maxLat' in WGS84 degrees")
     fr.add_argument("--out", required=True, help="output JSON path")
+
+    fl = sub.add_parser("fetch-landuse",
+                        help="download OSM land-use polygons + rail (Overpass) as JSON")
+    fl.add_argument("--bbox", required=True,
+                    help="'minLon,minLat,maxLon,maxLat' in WGS84 degrees")
+    fl.add_argument("--out", required=True, help="output JSON path")
+
+    fb = sub.add_parser("fetch-buildings",
+                        help="download OSM building footprints (Overpass) as JSON")
+    fb.add_argument("--bbox", required=True,
+                    help="'minLon,minLat,maxLon,maxLat' in WGS84 degrees")
+    fb.add_argument("--out", required=True, help="output JSON path")
 
     f = sub.add_parser("fixture", help="write a known-pattern test tile")
     f.add_argument("--out", required=True, help="output .gwt path")
@@ -101,6 +119,22 @@ def main(argv: list[str] | None = None) -> int:
         min_lon, min_lat, max_lon, max_lat = (
             float(s) for s in args.bbox.split(","))
         print(fetch_roads(min_lon, min_lat, max_lon, max_lat, args.out))
+        return 0
+
+    if args.command == "fetch-landuse":
+        from .landuse import fetch_landuse
+
+        min_lon, min_lat, max_lon, max_lat = (
+            float(s) for s in args.bbox.split(","))
+        print(fetch_landuse(min_lon, min_lat, max_lon, max_lat, args.out))
+        return 0
+
+    if args.command == "fetch-buildings":
+        from .buildings import fetch_buildings
+
+        min_lon, min_lat, max_lon, max_lat = (
+            float(s) for s in args.bbox.split(","))
+        print(fetch_buildings(min_lon, min_lat, max_lon, max_lat, args.out))
         return 0
 
     if args.command == "build":
@@ -144,9 +178,12 @@ def main(argv: list[str] | None = None) -> int:
 
         hydro = None
         roads = None
-        if args.hydro or args.roads:
+        landuse = None
+        buildings = None
+        if args.hydro or args.roads or args.landuse or args.buildings:
             if projection is None:
-                parser.error("--hydro/--roads require --anchor lat,lon")
+                parser.error("--hydro/--roads/--landuse/--buildings require "
+                             "--anchor lat,lon")
             from .tileio import TILE_SIZE
             if args.hydro:
                 from .hydro import HydroSource
@@ -156,10 +193,19 @@ def main(argv: list[str] | None = None) -> int:
                 from .roads import RoadSource
                 roads = RoadSource(args.roads, projection,
                                    extent_m=args.radius + TILE_SIZE)
+            if args.landuse:
+                from .landuse import LanduseSource
+                landuse = LanduseSource(args.landuse, projection,
+                                        extent_m=args.radius + TILE_SIZE)
+            if args.buildings:
+                from .buildings import BuildingSource
+                buildings = BuildingSource(args.buildings, projection,
+                                           extent_m=args.radius + TILE_SIZE)
 
         out = build_dataset(args.out, name=args.name, transform=transform,
                             source=source, projection=projection,
-                            hydro=hydro, roads=roads)
+                            hydro=hydro, roads=roads,
+                            landuse=landuse, buildings=buildings)
         print(f"wrote dataset: {out}")
         return 0
 

@@ -14,9 +14,12 @@ import net.minecraft.core.Holder;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.core.HolderSet;
 import net.minecraft.core.RegistryAccess;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.data.worldgen.features.TreeFeatures;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.WorldGenRegion;
 import net.minecraft.util.Mth;
+import net.minecraft.util.RandomSource;
 import net.minecraft.util.random.WeightedRandomList;
 import net.minecraft.world.entity.MobCategory;
 import net.minecraft.world.level.ChunkPos;
@@ -26,6 +29,9 @@ import net.minecraft.world.level.StructureManager;
 import net.minecraft.world.level.WorldGenLevel;
 import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.biome.BiomeManager;
+import net.minecraft.world.level.biome.BiomeSource;
+import net.minecraft.world.level.biome.Biomes;
+import net.minecraft.world.level.biome.FixedBiomeSource;
 import net.minecraft.world.level.biome.MobSpawnSettings;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
@@ -37,6 +43,7 @@ import net.minecraft.world.level.levelgen.GenerationStep;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.levelgen.RandomState;
 import net.minecraft.world.level.levelgen.blending.Blender;
+import net.minecraft.world.level.levelgen.feature.ConfiguredFeature;
 import net.minecraft.world.level.levelgen.structure.Structure;
 import net.minecraft.world.level.levelgen.structure.StructureSet;
 import net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplateManager;
@@ -83,6 +90,85 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
         };
     }
 
+    // Land-use surface class ids — shared with the compiler (landuse.py).
+    static final int SURFACE_NATURAL = 0;
+    static final int SURFACE_GRASS = 1;
+    static final int SURFACE_FARMLAND = 2;
+    static final int SURFACE_FOREST = 3;
+    static final int SURFACE_RESIDENTIAL = 4;
+    static final int SURFACE_COMMERCIAL = 5;
+    static final int SURFACE_INDUSTRIAL = 6;
+    static final int SURFACE_PARKING = 7;
+    static final int SURFACE_RAILWAY = 8;
+    static final int SURFACE_PARK = 9;
+
+    /**
+     * Top block each land-use class renders as. Classification stays
+     * semantic in the dataset — this theme is the only block mapping, so a
+     * different theme could restyle the same world.
+     */
+    @Nullable
+    public static BlockState surfaceBlock(int surfaceClass) {
+        return switch (surfaceClass) {
+            case SURFACE_GRASS, SURFACE_FOREST, SURFACE_RESIDENTIAL, SURFACE_PARK
+                    -> Blocks.GRASS_BLOCK.defaultBlockState();
+            case SURFACE_FARMLAND -> Blocks.FARMLAND.defaultBlockState();
+            case SURFACE_COMMERCIAL -> Blocks.LIGHT_GRAY_CONCRETE.defaultBlockState();
+            case SURFACE_INDUSTRIAL -> Blocks.GRAY_CONCRETE.defaultBlockState();
+            case SURFACE_PARKING -> Blocks.GRAY_CONCRETE.defaultBlockState();
+            case SURFACE_RAILWAY -> Blocks.GRAVEL.defaultBlockState();
+            default -> null;
+        };
+    }
+
+    // Building class ids — shared with the compiler (buildings.py).
+    static final int BUILDING_NONE = 0;
+    static final int BUILDING_RESIDENTIAL = 1;
+    static final int BUILDING_COMMERCIAL = 2;
+    static final int BUILDING_INDUSTRIAL = 3;
+    static final int BUILDING_CIVIC = 4;
+    static final int BUILDING_OUTBUILDING = 5;
+    static final int BUILDING_GENERIC = 6;
+
+    /** Wall/floor/roof materials per building class (Phase 8 theme). */
+    public record BuildPalette(BlockState wall, BlockState floor,
+                               BlockState roof, BlockState window) {}
+
+    /** Palette for a building class; null for none/unknown. */
+    @Nullable
+    public static BuildPalette buildingPalette(int buildingClass) {
+        return buildingClass > 0 && buildingClass < BUILDING_PALETTES.length
+                ? BUILDING_PALETTES[buildingClass] : null;
+    }
+
+    private static final BuildPalette[] BUILDING_PALETTES = {
+            null,
+            new BuildPalette(Blocks.BRICKS.defaultBlockState(),            // residential
+                    Blocks.OAK_PLANKS.defaultBlockState(),
+                    Blocks.DARK_OAK_PLANKS.defaultBlockState(),
+                    Blocks.GLASS.defaultBlockState()),
+            new BuildPalette(Blocks.STONE_BRICKS.defaultBlockState(),      // commercial
+                    Blocks.STONE.defaultBlockState(),
+                    Blocks.LIGHT_GRAY_CONCRETE.defaultBlockState(),
+                    Blocks.GLASS.defaultBlockState()),
+            new BuildPalette(Blocks.GRAY_CONCRETE.defaultBlockState(),     // industrial
+                    Blocks.STONE.defaultBlockState(),
+                    Blocks.LIGHT_GRAY_CONCRETE.defaultBlockState(),
+                    Blocks.GLASS.defaultBlockState()),
+            new BuildPalette(Blocks.QUARTZ_BLOCK.defaultBlockState(),      // civic
+                    Blocks.STONE.defaultBlockState(),
+                    Blocks.LIGHT_GRAY_CONCRETE.defaultBlockState(),
+                    Blocks.GLASS.defaultBlockState()),
+            new BuildPalette(Blocks.COBBLESTONE.defaultBlockState(),       // outbuilding
+                    Blocks.DIRT.defaultBlockState(),
+                    Blocks.DARK_OAK_PLANKS.defaultBlockState(),
+                    Blocks.GLASS.defaultBlockState()),
+            new BuildPalette(Blocks.BRICKS.defaultBlockState(),            // generic
+                    Blocks.STONE.defaultBlockState(),
+                    Blocks.GRAY_CONCRETE.defaultBlockState(),
+                    Blocks.GLASS.defaultBlockState()),
+    };
+
     private final NoiseBasedChunkGenerator delegate;
     private final GeoDataset dataset;
 
@@ -107,6 +193,42 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
 
     public GeoDataset dataset() {
         return dataset;
+    }
+
+    /**
+     * Lazily-resolved biome source for a GeoWorld level: a fixed plains
+     * biome while a dataset is loaded. Vanilla biome noise knows nothing
+     * about Nebraska — without this the Big Blue freezes in cold-biome
+     * spots and jungles cover downtown. Uniform plains is the closest
+     * vanilla biome to real Beatrice land cover; land-use classes provide
+     * the actual variety.
+     *
+     * <p>Resolved lazily: the delegate's multi-noise source holds an
+     * unbound parameter list until registries load, so {@code
+     * possibleBiomes()} cannot be called during preset decode.
+     */
+    private volatile BiomeSource geoBiomeSource;
+
+    private BiomeSource geoBiomeSource() {
+        BiomeSource src = geoBiomeSource;
+        if (src == null) {
+            synchronized (this) {
+                src = geoBiomeSource;
+                if (src == null) {
+                    src = delegate.getBiomeSource();
+                    if (!dataset.isEmpty()) {
+                        for (Holder<Biome> biome : src.possibleBiomes()) {
+                            if (biome.is(Biomes.PLAINS)) {
+                                src = new FixedBiomeSource(biome);
+                                break;
+                            }
+                        }
+                    }
+                    geoBiomeSource = src;
+                }
+            }
+        }
+        return src;
     }
 
     @Override
@@ -301,7 +423,16 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
 
     @Override
     public CompletableFuture<ChunkAccess> createBiomes(RandomState randomState, Blender blender, StructureManager structureManager, ChunkAccess chunk) {
-        return delegate.createBiomes(randomState, blender, structureManager, chunk);
+        BiomeSource source = geoBiomeSource();
+        if (source == delegate.getBiomeSource()) {
+            return delegate.createBiomes(randomState, blender, structureManager, chunk);
+        }
+        // Fill biome cells from OUR biome source (fixed plains while a
+        // dataset is loaded) — the delegate would write its own vanilla
+        // noise biomes instead. The source is climate-independent, so the
+        // random state's sampler suffices and no NoiseChunk is needed.
+        chunk.fillBiomesFromNoise(source, randomState.sampler());
+        return CompletableFuture.completedFuture(chunk);
     }
 
     @Override
@@ -325,15 +456,210 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
 
     @Override
     public void applyBiomeDecoration(WorldGenLevel level, ChunkAccess chunk, StructureManager structureManager) {
-        // Roads are paved before vanilla decoration: trees, flowers and
-        // grass patches require dirt-like ground and cannot plant on
-        // pavement, so road cells stay clear automatically.
+        // Geographic passes run before vanilla decoration: land-use surfaces
+        // and building shells replace the top terrain, then roads are paved
+        // so vegetation cannot plant on them.
+        applySurface(chunk);
+        buildBuildings(chunk);
         paveRoads(chunk);
         delegate.applyBiomeDecoration(level, chunk, structureManager);
+        plantForest(level, chunk);
         // Decoration can still deposit cover (snow layers) on pavement, and
-        // already-decorated neighbors may have grown trees into road cells
-        // before paving ran — clear anything that isn't terrain.
-        clearRoadCover(chunk);
+        // already-decorated neighbors may have grown trees into road or
+        // building cells — clear anything that isn't terrain or structure.
+        clearCover(chunk);
+    }
+
+    /**
+     * Replaces the top terrain block of classified land-use columns with the
+     * class's surface block (Phase 7). Water/road/building columns are
+     * skipped — the road and building passes own those cells.
+     */
+    private void applySurface(ChunkAccess chunk) {
+        if (dataset.isEmpty()) {
+            return;
+        }
+        ChunkPos chunkPos = chunk.getPos();
+        GeoTile tile = dataset.tileAt(chunkPos.getMinBlockX(), chunkPos.getMinBlockZ()).orElse(null);
+        if (tile == null || !tile.hasSurface()) {
+            return;
+        }
+        int minY = getMinY();
+        int topY = minY + getGenDepth() - 1;
+        BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+        boolean modified = false;
+        for (int lx = 0; lx < 16; lx++) {
+            for (int lz = 0; lz < 16; lz++) {
+                int x = chunkPos.getBlockX(lx);
+                int z = chunkPos.getBlockZ(lz);
+                int tlx = dataset.localCoord(x);
+                int tlz = dataset.localCoord(z);
+                int cls = tile.surfaceClass(tlx, tlz);
+                if (cls == SURFACE_NATURAL) {
+                    continue;
+                }
+                if (tile.waterDepth(tlx, tlz) > 0
+                        || tile.roadClass(tlx, tlz) != ROAD_NONE
+                        || tile.buildingClass(tlx, tlz) != BUILDING_NONE) {
+                    continue;
+                }
+                BlockState block = surfaceBlock(cls);
+                if (block == null) {
+                    continue;
+                }
+                int surface = groundHeight(chunk, pos, x, z, minY, topY);
+                if (surface <= minY) {
+                    continue;
+                }
+                if (chunk.getBlockState(pos.set(x, surface, z)) != block) {
+                    chunk.setBlockState(pos, block, false);
+                    modified = true;
+                }
+            }
+        }
+        if (modified) {
+            Heightmap.primeHeightmaps(chunk, EnumSet.allOf(Heightmap.Types.class));
+        }
+    }
+
+    /** Wall blocks below ground double as foundation fill under the footprint. */
+    private static final int FOUNDATION_DEPTH = 2;
+
+    /**
+     * Raises simple hollow building shells on compiled footprints (Phase 8):
+     * floor slab on the terrain top, perimeter walls with a window pattern
+     * up to {@code levels * 3 + 1} above ground, and a flat roof across the
+     * whole footprint. Boundary detection uses dataset lookups so walls on
+     * tile/chunk borders stay consistent. Water/road cells are skipped.
+     */
+    private void buildBuildings(ChunkAccess chunk) {
+        if (dataset.isEmpty()) {
+            return;
+        }
+        ChunkPos chunkPos = chunk.getPos();
+        GeoTile tile = dataset.tileAt(chunkPos.getMinBlockX(), chunkPos.getMinBlockZ()).orElse(null);
+        if (tile == null || !tile.hasBuilding()) {
+            return;
+        }
+        int minY = getMinY();
+        int topY = minY + getGenDepth() - 1;
+        BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+        boolean modified = false;
+        for (int lx = 0; lx < 16; lx++) {
+            for (int lz = 0; lz < 16; lz++) {
+                int x = chunkPos.getBlockX(lx);
+                int z = chunkPos.getBlockZ(lz);
+                int tlx = dataset.localCoord(x);
+                int tlz = dataset.localCoord(z);
+                int cls = tile.buildingClass(tlx, tlz);
+                if (cls == BUILDING_NONE || cls >= BUILDING_PALETTES.length) {
+                    continue;
+                }
+                if (tile.waterDepth(tlx, tlz) > 0
+                        || tile.roadClass(tlx, tlz) != ROAD_NONE) {
+                    continue;
+                }
+                int ground = groundHeight(chunk, pos, x, z, minY, topY);
+                if (ground <= minY) {
+                    continue;
+                }
+                BuildPalette palette = BUILDING_PALETTES[cls];
+                int levels = Math.max(1, tile.buildingLevels(tlx, tlz));
+                int roof = Math.min(topY, ground + levels * 3 + 1);
+
+                boolean edge = dataset.buildingClassAt(x + 1, z) == BUILDING_NONE
+                        || dataset.buildingClassAt(x - 1, z) == BUILDING_NONE
+                        || dataset.buildingClassAt(x, z + 1) == BUILDING_NONE
+                        || dataset.buildingClassAt(x, z - 1) == BUILDING_NONE;
+                if (edge) {
+                    for (int y = ground - FOUNDATION_DEPTH; y < roof; y++) {
+                        if (y <= minY) {
+                            continue;
+                        }
+                        BlockState cur = chunk.getBlockState(pos.set(x, y, z));
+                        if (y < ground) {
+                            // Foundation: only fill voids, never dig terrain.
+                            if (cur.isAir() || !cur.getFluidState().isEmpty()) {
+                                chunk.setBlockState(pos, palette.wall(), false);
+                            }
+                            continue;
+                        }
+                        // Window pattern: glass on a diagonal grid through the
+                        // mid-wall rows; ground row and top row stay solid.
+                        boolean window = y > ground && y < roof - 1
+                                && Math.floorMod(x + z, 3) == 0;
+                        chunk.setBlockState(pos,
+                                window ? palette.window() : palette.wall(), false);
+                    }
+                } else {
+                    // Interior: floor replaces the terrain top.
+                    chunk.setBlockState(pos.set(x, ground, z), palette.floor(), false);
+                }
+                if (roof <= topY) {
+                    chunk.setBlockState(pos.set(x, roof, z), palette.roof(), false);
+                }
+                modified = true;
+            }
+        }
+        if (modified) {
+            Heightmap.primeHeightmaps(chunk, EnumSet.allOf(Heightmap.Types.class));
+        }
+    }
+
+    /** Chance of a tree per forest column — sparse grove density. */
+    private static final int FOREST_TREE_DENOMINATOR = 28;
+
+    /**
+     * Plants deterministic oak trees on FOREST-classified columns (Phase 7).
+     * The fixed plains biome carries almost no trees, so woods need their
+     * own placement. Placement skips roads, water and building cells.
+     */
+    private void plantForest(WorldGenLevel level, ChunkAccess chunk) {
+        if (dataset.isEmpty()) {
+            return;
+        }
+        ChunkPos chunkPos = chunk.getPos();
+        GeoTile tile = dataset.tileAt(chunkPos.getMinBlockX(), chunkPos.getMinBlockZ()).orElse(null);
+        if (tile == null || !tile.hasSurface()) {
+            return;
+        }
+        Holder<ConfiguredFeature<?, ?>> oak = level.registryAccess()
+                .lookupOrThrow(Registries.CONFIGURED_FEATURE)
+                .get(TreeFeatures.OAK).orElse(null);
+        if (oak == null) {
+            return;
+        }
+        int minY = getMinY();
+        int topY = minY + getGenDepth() - 1;
+        long seed = level.getSeed();
+        BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+        RandomSource random = RandomSource.create();
+        for (int lx = 0; lx < 16; lx++) {
+            for (int lz = 0; lz < 16; lz++) {
+                int x = chunkPos.getBlockX(lx);
+                int z = chunkPos.getBlockZ(lz);
+                int tlx = dataset.localCoord(x);
+                int tlz = dataset.localCoord(z);
+                if (tile.surfaceClass(tlx, tlz) != SURFACE_FOREST) {
+                    continue;
+                }
+                if (tile.waterDepth(tlx, tlz) > 0
+                        || tile.roadClass(tlx, tlz) != ROAD_NONE
+                        || tile.buildingClass(tlx, tlz) != BUILDING_NONE) {
+                    continue;
+                }
+                random.setSeed(seed ^ (x * 341873128712L + z * 132897987541L));
+                if (random.nextInt(FOREST_TREE_DENOMINATOR) != 0) {
+                    continue;
+                }
+                int ground = groundHeight(chunk, pos, x, z, minY, topY);
+                BlockState soil = chunk.getBlockState(pos.set(x, ground, z));
+                if (!soil.is(Blocks.GRASS_BLOCK) && !soil.is(Blocks.DIRT)) {
+                    continue;
+                }
+                oak.value().place(level, this, random, pos.set(x, ground + 1, z));
+            }
+        }
     }
 
     /**
@@ -393,18 +719,20 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
     }
 
     /**
-     * Removes decoration output sitting above paved cells: snow layers and
+     * Removes decoration output sitting on paved cells (snow layers and
      * other replaceable cover deposited by the freeze step, plus trunk/leaf
-     * intrusions written by neighbors that decorated before this chunk paved.
-     * Only vegetation/cover is stripped — terrain overhangs are left alone.
+     * intrusions written by neighbors that decorated before this chunk
+     * paved) and clears vegetation out of building footprints — shell
+     * blocks are never vegetation, so the full column is safe to scrub.
+     * Terrain overhangs are left alone.
      */
-    private void clearRoadCover(ChunkAccess chunk) {
+    private void clearCover(ChunkAccess chunk) {
         if (dataset.isEmpty()) {
             return;
         }
         ChunkPos chunkPos = chunk.getPos();
         GeoTile tile = dataset.tileAt(chunkPos.getMinBlockX(), chunkPos.getMinBlockZ()).orElse(null);
-        if (tile == null || !tile.hasRoad()) {
+        if (tile == null || (!tile.hasRoad() && !tile.hasBuilding())) {
             return;
         }
 
@@ -419,8 +747,22 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
                 int z = chunkPos.getBlockZ(lz);
                 int tlx = dataset.localCoord(x);
                 int tlz = dataset.localCoord(z);
-                if (tile.roadClass(tlx, tlz) == ROAD_NONE
-                        || tile.waterDepth(tlx, tlz) > 0) {
+                if (tile.waterDepth(tlx, tlz) > 0) {
+                    continue;
+                }
+                if (tile.buildingClass(tlx, tlz) != BUILDING_NONE) {
+                    // Inside a shell nothing vegetation is legitimate —
+                    // scrub the whole column.
+                    for (int y = minY + 1; y <= topY; y++) {
+                        BlockState cur = chunk.getBlockState(pos.set(x, y, z));
+                        if (isFeatureOverhang(cur)) {
+                            chunk.setBlockState(pos, AIR, false);
+                            modified = true;
+                        }
+                    }
+                    continue;
+                }
+                if (tile.roadClass(tlx, tlz) == ROAD_NONE) {
                     continue;
                 }
                 int surface = groundHeight(chunk, pos, x, z, minY, topY);
@@ -440,7 +782,7 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
     }
 
     /** Blocks decoration writes above terrain: plants/cover, tree trunks, leaves. */
-    private static boolean isFeatureOverhang(BlockState state) {
+    public static boolean isFeatureOverhang(BlockState state) {
         return state.canBeReplaced()
                 || state.is(net.minecraft.tags.BlockTags.LEAVES)
                 || state.is(net.minecraft.tags.BlockTags.LOGS);

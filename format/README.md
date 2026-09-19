@@ -84,6 +84,8 @@ then one section per set mask bit, in ascending bit order:
 | 0x08 | road      | `u8[65536]` road class ids (Phase 6)      |
 | 0x10 | water     | bitset, 8192 bytes; bit `i` = column `i`  |
 | 0x20 | water_depth | `u8[65536]` water depth in blocks (0 = dry) |
+| 0x40 | building  | `u8[65536]` building class ids (Phase 8)  |
+| 0x80 | building_levels | `u8[65536]` floor count in footprints |
 
 Bitset packing: bit `i` is bit `i % 8` (LSB-first) of byte `i / 8`.
 
@@ -99,6 +101,15 @@ Notes:
   `4` shoulder, `5` track, `6` center-line marking. The compiler rasterizes
   OSM highway cross-sections by priority (major roads overwrite minor), so
   the runtime is a pure class→block lookup; `0` means "no road".
+- `surface` class ids (Phase 7): `0` natural/unclassified, `1` grass, `2`
+  farmland, `3` forest, `4` residential, `5` commercial, `6` industrial,
+  `7` parking, `8` railway, `9` park. Semantic land use only — the runtime
+  theme maps classes to blocks.
+- `building` class ids (Phase 8): `0` none, `1` residential, `2` commercial,
+  `3` industrial, `4` civic, `5` outbuilding, `6` generic. `building_levels`
+  holds the floor count inside footprint cells (`building:levels`/`height`
+  tags, else class defaults). The runtime extrudes a shell: floor slab,
+  perimeter walls with window banding, flat roof.
 - `water` is the footprint mask; `water_depth` (Phase 5) is the water column
   depth in blocks. At wet columns `elevation` holds the **channel bed** Y
   (the compiler bakes the riverbed into the elevation layer), and the runtime

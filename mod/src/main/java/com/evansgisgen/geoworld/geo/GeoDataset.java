@@ -145,6 +145,36 @@ public final class GeoDataset {
         return isEmpty() ? ScalarField.ZERO : this::influence;
     }
 
+    // Cross-tile column lookups — resolve the covering tile (if any) and read
+    // the local layer cell. Missing tiles/layers read as "absent" (0).
+
+    public int surfaceClassAt(int x, int z) {
+        GeoTile tile = tileAt(x, z).orElse(null);
+        return tile == null || !tile.hasSurface()
+                ? 0 : tile.surfaceClass(localCoord(x), localCoord(z));
+    }
+
+    public int roadClassAt(int x, int z) {
+        GeoTile tile = tileAt(x, z).orElse(null);
+        return tile == null || !tile.hasRoad()
+                ? 0 : tile.roadClass(localCoord(x), localCoord(z));
+    }
+
+    public int waterDepthAt(int x, int z) {
+        GeoTile tile = tileAt(x, z).orElse(null);
+        return tile == null ? 0 : tile.waterDepth(localCoord(x), localCoord(z));
+    }
+
+    public int buildingClassAt(int x, int z) {
+        GeoTile tile = tileAt(x, z).orElse(null);
+        return tile == null ? 0 : tile.buildingClass(localCoord(x), localCoord(z));
+    }
+
+    public int buildingLevelsAt(int x, int z) {
+        GeoTile tile = tileAt(x, z).orElse(null);
+        return tile == null ? 0 : tile.buildingLevels(localCoord(x), localCoord(z));
+    }
+
     private Optional<GeoTile> loadTile(long key) {
         int tx = (int) (key >> 32);
         int tz = (int) (long) key;

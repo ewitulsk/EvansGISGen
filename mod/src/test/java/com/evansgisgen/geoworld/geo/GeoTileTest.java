@@ -21,8 +21,11 @@ import org.junit.jupiter.api.Test;
  *   elevation[i] = (i * 7) % 500 - 250   (int16)
  *   influence[i] = i % 256               (u8)
  *   surface[i]   = i % 17                (u8)
+ *   road[i]      = i % 7                 (u8)
  *   water bit i  = set iff i % 3 == 0
  *   water_depth[i] = i % 5               (u8)
+ *   building[i]  = i % 7                 (u8)
+ *   building_levels[i] = i % 9           (u8)
  * </pre>
  *
  * i = localZ * 256 + localX.
@@ -42,8 +45,9 @@ class GeoTileTest {
         assertTrue(tile.hasElevation());
         assertTrue(tile.hasInfluence());
         assertTrue(tile.hasSurface());
-        assertFalse(tile.hasRoad());
+        assertTrue(tile.hasRoad());
         assertTrue(tile.hasWater());
+        assertTrue(tile.hasBuilding());
     }
 
     @Test
@@ -91,6 +95,27 @@ class GeoTileTest {
         assertEquals(4, tile.waterDepth(4, 0));
         assertEquals(1, tile.waterDepth(0, 1));            // i = 256 -> 256 % 5
         assertEquals(0, tile.waterDepth(255, 255));        // i = 65535 -> 65535 % 5
+    }
+
+    @Test
+    void road() throws IOException {
+        GeoTile tile = loadFixture();
+        assertEquals(1, tile.roadClass(1, 0));
+        assertEquals(6, tile.roadClass(6, 0));
+        assertEquals(0, tile.roadClass(7, 0));
+        assertEquals(6, tile.roadClass(2, 1));             // i = 258 -> 258 % 7
+    }
+
+    @Test
+    void building() throws IOException {
+        GeoTile tile = loadFixture();
+        assertEquals(1, tile.buildingClass(1, 0));
+        assertEquals(6, tile.buildingClass(6, 0));
+        assertEquals(0, tile.buildingClass(7, 0));
+        assertEquals(1, tile.buildingLevels(1, 0));
+        assertEquals(8, tile.buildingLevels(8, 0));
+        assertEquals(0, tile.buildingLevels(9, 0));
+        assertEquals(4, tile.buildingLevels(0, 1));        // i = 256 -> 256 % 9
     }
 
     /**

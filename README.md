@@ -13,7 +13,7 @@ dataset). See [PLAN.md](PLAN.md) for the full implementation plan.
 └── format/     # dataset format spec
 ```
 
-## Current status: Phase 6
+## Current status: Phase 8
 
 - `GeoChunkGenerator` wraps a vanilla `ChunkGenerator` (`geoworld:geoworld`)
   and delegates everything to it, then deforms terrain from geographic data:
@@ -54,15 +54,48 @@ dataset). See [PLAN.md](PLAN.md) for the full implementation plan.
   pavement) and strips decoration output — snow cover, intruding tree
   trunks/canopies — back off the surface afterwards. Water cells stay
   unpaved until bridges exist.
+- Land use (Phase 7): `fetch-landuse` pulls OSM `landuse`/`leisure`/
+  `natural`/`railway`/`aeroway` polygons; `landuse.py` rasterizes them into
+  a per-cell surface class (`0x04` layer: residential, farmland, forest,
+  commercial, industrial, parking, park, railway, ...). The runtime maps
+  semantic classes to blocks through a theme palette — applied *before*
+  road paving so streets stay authoritative — and plants deterministic
+  trees on `FOREST` cells. A fixed-plains biome source replaces vanilla
+  biome noise while a dataset is loaded, killing seed-random jungles and
+  frozen rivers (biomes are resolved lazily because the overworld's
+  parameter list is unbound during preset decode).
+- Buildings (Phase 8): `fetch-buildings` pulls OSM `building` footprints;
+  `buildings.py` rasterizes each polygon into a building class
+  (`0x40`: residential/commercial/industrial/civic/outbuilding/generic)
+  plus a `building_levels` layer (`0x80`: OSM `building:levels`, or
+  `height`/3, or a per-class default). The runtime extrudes deterministic
+  shells — floor at terrain, walls to `terrain + levels*4`, a window band
+  on the second level, flat roof — respecting roads and water, and clearing
+  vegetation/canopy overhang above roofs. Landmark hook: a claimed
+  building ID will suppress its shell (Phase 9).
 - `geoworld_compiler` (Python) writes the format: `manifest.json` + 256x256
   tiles with zlib-compressed sections (elevation int16, influence u8,
-  surface/road u8, water bitset, water depth u8). `dem.py` mosaics + reprojects real elevation
+  surface/road u8, water bitset, water depth u8, building u8 + levels u8). `dem.py` mosaics + reprojects real elevation
   rasters (rasterio/pyproj) onto the geo meter grid; `fetch.py` downloads
   USGS 3DEP 1 m DEM tiles from The National Map.
 - `datasets/beatrice.geoworld` is real USGS 1 m LiDAR terrain for downtown
   Beatrice, NE (~8 km square, 1024 tiles, 372-428 m real elevation). Spawn is
   downtown Beatrice; the Big Blue River valley is visible east of the origin.
   `datasets/synthetic.geoworld` remains as the no-GIS pipeline test.
+
+### Beatrice landmarks (block coords)
+
+Block `(x, z)` maps to geo `(east_m, -north_m)` relative to the anchor at
+6th & Court downtown. `+x` = east, `+z` = south.
+
+| Place                              | x     | z     |
+|------------------------------------|-------|-------|
+| 6th St & Court St (US-77 downtown) | 26    | 248   |
+| 17th St & High St                  | 1337  | -128  |
+| Orange Blvd & East Scott Rd        | 3046  | 519   |
+| Orange Blvd south end (high school)| 3055  | 610   |
+| Big Blue River channel             | 1243  | 1782  |
+| Dusenbery-Doyle Reservoir          | -600  | 1985  |
 - Debug commands: `/geoworld info`, `/geoworld geo`,
   `/geoworld geo <east> <north>`.
 
