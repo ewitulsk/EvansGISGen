@@ -1,0 +1,139 @@
+package com.evansgisgen.geoworld.geo;
+
+import com.google.common.cache.CacheBuilder;
+import com.google.common.cache.CacheLoader;
+import com.google.common.cache.LoadingCache;
+import com.google.gson.Gson;
+import com.google.gson.JsonObject;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Locale;
+import java.util.Optional;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Runtime view of a precompiled {@code .geoworld} dataset directory produced by
+ * the offline compiler. A dataset is a {@code manifest.json} plus a
+ * {@code tiles/} directory of binary {@link GeoTile} files covering
+ * {@code tileSize x tileSize} block columns each.
+ *
+ * <p>Tiles are immutable and cached; lookups are plain array indexing. When no
+ * dataset is present this object is "empty" and every lookup returns absent.
+ */
+public final class GeoDataset {
+    private static final Logger LOGGER = LoggerFactory.getLogger(GeoDataset.class);
+    private static final Gson GSON = new Gson();
+    private static final int DEFAULT_TILE_SIZE = 256;
+    private static final int MAX_CACHED_TILES = 512;
+
+    @Nullable private final Path root;
+    private final GeoTransform transform;
+    private final int tileSize;
+    private final LoadingCache<Long, Optional<GeoTile>> tiles;
+
+    private GeoDataset(@Nullable Path root, GeoTransform transform, int tileSize) {
+        this.root = root;
+        this.transform = transform;
+        this.tileSize = tileSize;
+        this.tiles = CacheBuilder.newBuilder()
+                .maximumSize(MAX_CACHED_TILES)
+                .build(CacheLoader.from(this::loadTile));
+    }
+
+    public static GeoDataset empty() {
+        return new GeoDataset(null, GeoTransform.DEFAULT, DEFAULT_TILE_SIZE);
+    }
+
+    /**
+     * Loads a dataset directory. When {@code root} is null/missing/unreadable
+     * the result is an empty dataset carrying the fallback transform.
+     */
+    public static GeoDataset load(@Nullable Path root, GeoTransform fallbackTransform) {
+        if (root == null || !Files.isDirectory(root)) {
+            return new GeoDataset(null, fallbackTransform, DEFAULT_TILE_SIZE);
+        }
+        Path manifestFile = root.resolve("manifest.json");
+        if (!Files.isRegularFile(manifestFile)) {
+            LOGGER.warn("Dataset at {} has no manifest.json; ignoring", root);
+            return new GeoDataset(null, fallbackTransform, DEFAULT_TILE_SIZE);
+        }
+        try {
+            JsonObject manifest = GSON.fromJson(Files.readString(manifestFile), JsonObject.class);
+            GeoTransform transform = manifest.has("transform")
+                    ? GeoWorldConfig.parseTransform(manifest.getAsJsonObject("transform"))
+                    : fallbackTransform;
+            int tileSize = manifest.has("tile_size") ? manifest.get("tile_size").getAsInt() : DEFAULT_TILE_SIZE;
+            String name = manifest.has("name") ? manifest.get("name").getAsString() : root.getFileName().toString();
+            LOGGER.info("Loaded GeoWorld dataset '{}' from {} ({} tiles)", name, root,
+                    manifest.has("tile_count") ? manifest.get("tile_count").getAsInt() : -1);
+            return new GeoDataset(root, transform, tileSize);
+        } catch (IOException | RuntimeException e) {
+            LOGGER.warn("Failed to read dataset manifest {}: {}", manifestFile, e.toString());
+            return new GeoDataset(null, fallbackTransform, DEFAULT_TILE_SIZE);
+        }
+    }
+
+    public boolean isEmpty() {
+        return root == null;
+    }
+
+    public GeoTransform transform() {
+        return transform;
+    }
+
+    public int tileSize() {
+        return tileSize;
+    }
+
+    /** Tile-local coordinate of a block position (0..tileSize-1). */
+    public int localCoord(int blockCoord) {
+        return Math.floorMod(blockCoord, tileSize);
+    }
+
+    /** The tile covering block position (x, z), if the dataset has it. */
+    public Optional<GeoTile> tileAt(int blockX, int blockZ) {
+        if (root == null) {
+            return Optional.empty();
+        }
+        int tx = Math.floorDiv(blockX, tileSize);
+        int tz = Math.floorDiv(blockZ, tileSize);
+        long key = ((long) tx << 32) | (tz & 0xFFFFFFFFL);
+        return tiles.getUnchecked(key);
+    }
+
+    private Optional<GeoTile> loadTile(long key) {
+        int tx = (int) (key >> 32);
+        int tz = (int) (long) key;
+        Path file = root.resolve("tiles").resolve(tileFileName(tx, tz));
+        if (!Files.isRegularFile(file)) {
+            return Optional.empty();
+        }
+        try {
+            return Optional.of(GeoTile.read(file, tileSize));
+        } catch (IOException | RuntimeException e) {
+            LOGGER.warn("Failed to read tile {}: {}", file, e.toString());
+            return Optional.empty();
+        }
+    }
+
+    static String tileFileName(int tileX, int tileZ) {
+        return String.format(Locale.ROOT, "%+05d_%+05d.gwt", tileX, tileZ);
+    }
+
+    // Convenience wrappers matching the plan's runtime API.
+
+    public int blockX(double eastMeters) {
+        return transform.blockX(eastMeters);
+    }
+
+    public int blockZ(double northMeters) {
+        return transform.blockZ(northMeters);
+    }
+
+    public GeoPoint minecraftToGeo(int x, int z) {
+        return transform.geoPoint(x, z);
+    }
+}
