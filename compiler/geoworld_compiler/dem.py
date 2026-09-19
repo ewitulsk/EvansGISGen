@@ -20,7 +20,7 @@ from rasterio.fill import fillnodata
 from rasterio.merge import merge
 from rasterio.warp import Resampling, reproject
 
-from .sources import smootherstep
+from .influence import BoxRamp, Field
 
 
 class DemSource:
@@ -40,12 +40,17 @@ class DemSource:
         half_extent_m: float,
         ramp_m: float,
         resolution_m: float = 1.0,
+        influence: Field | None = None,
     ):
         self.anchor_east = anchor_east
         self.anchor_north = anchor_north
         self.half_extent_m = half_extent_m
         self.ramp_m = ramp_m
         self.resolution_m = resolution_m
+        # Influence is a composable field (influence.py); default = the
+        # coverage box ramp. Corridors/regions are combined via combine_max.
+        self._influence_field = influence or BoxRamp(half_extent_m, ramp_m)
+        self._extent_m = max(half_extent_m, self._influence_field.extent_m())
 
         # Pad the sampling grid past the influence extent so boundary tiles
         # (rounded up to 256-block edges) still have real data to read.
@@ -94,8 +99,12 @@ class DemSource:
         self._grid = grid
 
     def extent_m(self) -> float:
-        """Half-extent of the square coverage region, in geo meters."""
-        return self.half_extent_m
+        """Half-extent of the square coverage region, in geo meters.
+
+        Covers the influence field's reach (e.g. a corridor extending past
+        the DEM box), not just the elevation source itself.
+        """
+        return self._extent_m
 
     def elevation_m(self, east: float, north: float) -> float | None:
         col = math.floor((self.anchor_east + east - self._x0) / self.resolution_m)
@@ -106,8 +115,4 @@ class DemSource:
         return None if np.isnan(v) else float(v)
 
     def influence(self, east: float, north: float) -> float:
-        # Ramp the influence to zero over the last ramp_m inside coverage.
-        edge_dist = self.half_extent_m - max(abs(east), abs(north))
-        if edge_dist <= 0.0:
-            return 0.0
-        return smootherstep(min(1.0, edge_dist / self.ramp_m))
+        return self._influence_field.weight(east, north)

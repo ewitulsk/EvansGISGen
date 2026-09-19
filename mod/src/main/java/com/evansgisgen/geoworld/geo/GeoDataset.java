@@ -122,6 +122,29 @@ public final class GeoDataset {
         return tiles.getUnchecked(key);
     }
 
+    /**
+     * Geographic influence weight at block column (x, z) in [0, 1].
+     *
+     * <p>A tile carrying elevation but no explicit influence layer counts as
+     * fully geographic; a missing tile or a tile with neither layer is
+     * completely vanilla.
+     */
+    public float influence(int x, int z) {
+        GeoTile tile = tileAt(x, z).orElse(null);
+        if (tile == null) {
+            return 0.0f;
+        }
+        if (!tile.hasInfluence()) {
+            return tile.hasElevation() ? 1.0f : 0.0f;
+        }
+        return tile.influenceWeight(localCoord(x), localCoord(z)) / 255.0f;
+    }
+
+    /** The dataset's influence layer as a sampled {@link ScalarField}. */
+    public ScalarField influenceField() {
+        return isEmpty() ? ScalarField.ZERO : this::influence;
+    }
+
     private Optional<GeoTile> loadTile(long key) {
         int tx = (int) (key >> 32);
         int tz = (int) (long) key;

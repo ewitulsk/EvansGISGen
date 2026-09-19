@@ -15,6 +15,7 @@ import net.minecraft.world.level.levelgen.Heightmap;
 import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.event.server.ServerStartedEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
+import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -42,7 +43,10 @@ public final class TerrainSurveyScenario {
             {0, 0}, {64, 64}, {-128, 96}, {200, -100},
             {1500, 1500}, {1900, 1900}, {2100, 2100},
             {-1500, 0}, {0, -2000},
-            {3800, 0}, {3900, 0},
+            // Transect across the eastern boundary ramp (influence 1 -> 0
+            // over the outer ~500 m of coverage) — the Phase 4 check that the
+            // geographic-to-vanilla blend actually follows the field.
+            {3300, 0}, {3500, 0}, {3600, 0}, {3700, 0}, {3800, 0}, {3900, 0},
             {5000, 0}, {-5000, -5000},
     };
 
@@ -74,9 +78,9 @@ public final class TerrainSurveyScenario {
         }
     }
 
-    private record ColumnReport(int x, int z, int topY, BlockState top,
+    private record ColumnReport(int x, int z, int topY, int groundY, BlockState top,
                                 int waterInTop24, int target, double weight,
-                                List<String> topBlocks) {}
+                                int vanilla, int expected, List<String> topBlocks) {}
 
     private void run(MinecraftServer server) {
         ServerLevel level = server.overworld();
@@ -101,9 +105,18 @@ public final class TerrainSurveyScenario {
             LOGGER.info("GEOWORLD-GEN delegateBaseColumn(5000,0) topNonAir={}", col);
         }
 
+        // Vanilla baseline for blend assertions: only meaningful when our
+        // generator is active (control runs use the vanilla generator, which
+        // ignores the dataset entirely).
+        net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator delegate =
+                gen instanceof com.evansgisgen.geoworld.worldgen.GeoChunkGenerator geo
+                        ? geo.delegate() : null;
+        net.minecraft.world.level.levelgen.RandomState randomState =
+                level.getChunkSource().randomState();
+
         List<ColumnReport> reports = new ArrayList<>();
         for (int[] p : SAMPLES) {
-            reports.add(survey(level, dataset, p[0], p[1]));
+            reports.add(survey(level, dataset, delegate, randomState, p[0], p[1]));
         }
         LOGGER.info("GEOWORLD-SURVEY-END");
 
@@ -116,12 +129,24 @@ public final class TerrainSurveyScenario {
                 .toList();
         pass &= check("full_influence_samples_present", !fullInfluence.isEmpty());
         for (ColumnReport r : fullInfluence) {
+            // Ground (leaf-stripped motion-blocking top) is the terrain
+            // surface; topY can carry trees from a neighboring chunk's
+            // decoration, which is timing-dependent to observe.
             pass &= check(String.format("height_matches_dataset_%d_%d", r.x, r.z),
-                    Math.abs(r.topY - r.target) <= 6);
+                    Math.abs(r.groundY - r.target) <= 6);
         }
         for (ColumnReport r : reports) {
             pass &= check(String.format("no_water_surface_%d_%d", r.x, r.z),
                     !r.top.is(Blocks.WATER));
+        }
+        // Phase 4: the generated ground must follow lerp(vanilla, geo, w).
+        // Measured on the leaf-stripped motion-blocking surface; the slack
+        // covers trunks, surface-rule blocks and snow sitting above it.
+        for (ColumnReport r : reports) {
+            if (r.expected != GeoTile.NO_DATA) {
+                pass &= check(String.format("blend_matches_field_%d_%d", r.x, r.z),
+                        Math.abs(r.groundY - r.expected) <= 12);
+            }
         }
         LOGGER.info("GEOWORLD-RESULT {}", pass ? "PASS" : "FAIL");
     }
@@ -131,18 +156,33 @@ public final class TerrainSurveyScenario {
         return ok;
     }
 
-    private ColumnReport survey(ServerLevel level, GeoDataset dataset, int x, int z) {
-        ChunkAccess chunk = level.getChunk(x >> 4, z >> 4);
+    private ColumnReport survey(ServerLevel level, GeoDataset dataset,
+            @Nullable net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator delegate,
+            net.minecraft.world.level.levelgen.RandomState randomState, int x, int z) {
+        // Force the 3x3 chunk neighborhood to FULL before measuring: feature
+        // writes from a neighbor's decoration (e.g. tree leaf overhang) land
+        // asynchronously, so sampling without this races chunk population.
+        int cx = x >> 4;
+        int cz = z >> 4;
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                level.getChunk(cx + dx, cz + dz);
+            }
+        }
+        ChunkAccess chunk = level.getChunk(cx, cz);
         int minY = level.getMinBuildHeight();
         int topY;
+        int groundY;
         BlockState top;
         int waterInTop24 = 0;
         List<String> topBlocks = new ArrayList<>();
         if (chunk == null) {
             topY = minY;
+            groundY = minY;
             top = Blocks.AIR.defaultBlockState();
         } else {
             topY = level.getHeight(Heightmap.Types.WORLD_SURFACE, x, z) - 1;
+            groundY = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z) - 1;
             BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
             top = level.getBlockState(pos.set(x, topY, z));
             for (int y = topY; y > topY - 24 && y > minY; y--) {
@@ -168,8 +208,19 @@ public final class TerrainSurveyScenario {
             }
         }
 
-        LOGGER.info("GEOWORLD-SURVEY x={} z={} topY={} top={} waterInTop24={} target={} w={} blocks={}",
-                x, z, topY, top.getBlock(), waterInTop24, target, String.format("%.2f", weight), topBlocks);
-        return new ColumnReport(x, z, topY, top, waterInTop24, target, weight, topBlocks);
+        int vanilla = GeoTile.NO_DATA;
+        int expected = GeoTile.NO_DATA;
+        if (delegate != null) {
+            vanilla = delegate.getBaseHeight(x, z, Heightmap.Types.OCEAN_FLOOR, level, randomState);
+            if (target != GeoTile.NO_DATA && weight > 0.0) {
+                expected = (int) Math.round(vanilla + (target - vanilla) * weight);
+            }
+        }
+
+        LOGGER.info("GEOWORLD-SURVEY x={} z={} topY={} ground={} top={} waterInTop24={} target={} w={} vanilla={} expected={} blocks={}",
+                x, z, topY, groundY, top.getBlock(), waterInTop24, target,
+                String.format("%.2f", weight), vanilla, expected, topBlocks);
+        return new ColumnReport(x, z, topY, groundY, top, waterInTop24, target, weight,
+                vanilla, expected, topBlocks);
     }
 }

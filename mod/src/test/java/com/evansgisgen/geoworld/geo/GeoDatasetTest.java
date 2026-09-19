@@ -65,6 +65,27 @@ class GeoDatasetTest {
     }
 
     @Test
+    void influenceField() throws IOException {
+        GeoDataset ds = datasetWithFixture();
+        ScalarField field = ds.influenceField();
+        // Fixture pattern: influence[i] = i % 256, i = lz*256 + lx.
+        assertEquals(0.0f, field.sample(0, 0));
+        assertEquals(1.0f / 255.0f, field.sample(1, 0), 1e-7);
+        assertEquals(1.0f, field.sample(255, 0), 1e-7);
+        assertEquals(0.0f, field.sample(0, 1));        // i=256 wraps to 0
+        assertEquals(1.0f, field.sample(255, 255), 1e-7);
+        assertEquals(0.0f, field.sample(5000, 0));     // no tile -> vanilla
+        assertEquals(field.sample(7, 9), ds.influence(7, 9));
+    }
+
+    @Test
+    void emptyDatasetHasZeroInfluence() {
+        GeoDataset ds = GeoDataset.empty();
+        assertEquals(0.0f, ds.influence(0, 0));
+        assertEquals(0.0f, ds.influenceField().sample(100, -100));
+    }
+
+    @Test
     void localCoords() {
         GeoDataset ds = GeoDataset.empty();
         assertEquals(0, ds.localCoord(0));

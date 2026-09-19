@@ -13,7 +13,7 @@ dataset). See [PLAN.md](PLAN.md) for the full implementation plan.
 └── format/     # dataset format spec
 ```
 
-## Current status: Phase 3
+## Current status: Phase 4
 
 - `GeoChunkGenerator` wraps a vanilla `ChunkGenerator` (`geoworld:geoworld`)
   and delegates everything to it, then deforms terrain from geographic data:
@@ -29,6 +29,14 @@ dataset). See [PLAN.md](PLAN.md) for the full implementation plan.
   immutable) — `dataset.tileAt(x, z)` + `tile.elevation(lx, lz)` are plain
   array lookups; no GIS libraries at runtime. `-32768` elevation cells are
   NODATA and fall back to vanilla.
+- Influence is a generic precomputed `ScalarField`
+  (`dataset.influenceField()`): the compiler bakes `0=vanilla / 1=geographic`
+  weights into tiles from composable sources (`BoxRamp`, `DiscRamp`,
+  `CorridorRamp` polylines, `combine_max`/`combine_sum` in `influence.py`),
+  so cities and corridors are never special to worldgen — Phase 10's US-77
+  corridor just adds another source. The survey's `blend_matches_field`
+  assertions verify generated terrain follows `lerp(vanilla, geo, w)`
+  across the boundary transect.
 - `geoworld_compiler` (Python) writes the format: `manifest.json` + 256x256
   tiles with zlib-compressed sections (elevation int16, influence u8,
   surface/road u8, water bitset). `dem.py` mosaics + reprojects real elevation

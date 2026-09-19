@@ -13,10 +13,9 @@ from __future__ import annotations
 
 import math
 
+from .influence import DiscRamp, smootherstep
 
-def smootherstep(t: float) -> float:
-    t = max(0.0, min(1.0, t))
-    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+__all__ = ["SyntheticSource", "smootherstep"]
 
 
 class SyntheticSource:
@@ -29,8 +28,8 @@ class SyntheticSource:
 
     def __init__(self, base_elevation_m: float, radius_full_m: float, radius_edge_m: float):
         self.base_elevation_m = base_elevation_m
-        self.radius_full_m = radius_full_m
         self.radius_edge_m = radius_edge_m
+        self._field = DiscRamp(0.0, 0.0, radius_full_m, radius_edge_m)
 
     def elevation_m(self, east: float, north: float) -> float:
         """Synthetic elevation: broad swells plus medium-frequency rolling."""
@@ -43,12 +42,7 @@ class SyntheticSource:
 
     def influence(self, east: float, north: float) -> float:
         """0..1 geographic influence: full inside radius_full, ramp to edge."""
-        d = math.hypot(east, north)
-        if d >= self.radius_edge_m:
-            return 0.0
-        if d <= self.radius_full_m:
-            return 1.0
-        return smootherstep((self.radius_edge_m - d) / (self.radius_edge_m - self.radius_full_m))
+        return self._field.weight(east, north)
 
     def extent_m(self) -> float:
         return self.radius_edge_m

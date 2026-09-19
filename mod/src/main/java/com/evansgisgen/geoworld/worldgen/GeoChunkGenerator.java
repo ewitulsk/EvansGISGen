@@ -133,7 +133,7 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
             if (height == GeoTile.NO_DATA) {
                 return null;
             }
-            double w = tile.hasInfluence() ? tile.influenceWeight(lx, lz) / 255.0 : 1.0;
+            double w = dataset.influence(x, z);
             return w <= 0.0 ? null : new GeoTarget(height, w);
         }
         double w = circleInfluence(x, z);
