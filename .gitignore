@@ -1,0 +1,25 @@
+# Gradle
+.gradle/
+build/
+run/
+run-data/
+run-*/
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.classpath
+.project
+.settings/
+bin/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local
+repo/
+out/
