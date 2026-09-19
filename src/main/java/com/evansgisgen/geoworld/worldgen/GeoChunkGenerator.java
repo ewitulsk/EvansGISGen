@@ -1,6 +1,7 @@
 package com.evansgisgen.geoworld.worldgen;
 
 import com.evansgisgen.geoworld.geo.GeoDataset;
+import com.evansgisgen.geoworld.geo.GeoTransform;
 import com.mojang.datafixers.util.Pair;
 import com.mojang.serialization.MapCodec;
 import java.util.EnumSet;
@@ -42,8 +43,9 @@ import org.jetbrains.annotations.Nullable;
  * Chunk generator that wraps a vanilla {@link ChunkGenerator} (typically a
  * {@code NoiseBasedChunkGenerator}) and applies geographic overrides on top.
  *
- * <p>Phase 0 proof-of-concept: terrain is deformed toward {@link #TARGET_HEIGHT}
- * inside a circle of radius {@link #EDGE_RADIUS} around world origin (0, 0),
+ * <p>Phase 0/1 proof-of-concept: terrain is deformed toward {@link #TARGET_HEIGHT}
+ * inside a circle of radius {@link #EDGE_RADIUS} centered on the configured
+ * geographic origin ({@link GeoTransform#originX()}/{@link GeoTransform#originZ()}),
  * fully flattened within {@link #FULL_RADIUS} and smoothly blended to vanilla
  * at the rim. All other behavior is delegated to the wrapped generator.
  */
@@ -87,16 +89,19 @@ public final class GeoChunkGenerator extends ChunkGenerator {
      * Returns the geographic influence weight at world position {@code (x, z)}:
      * 1.0 fully geographic, 0.0 fully vanilla.
      */
-    private static double influence(int x, int z) {
-        double distSq = (double) x * x + (double) z * z;
+    private double influence(int x, int z) {
+        GeoTransform t = dataset.transform();
+        double dx = x - t.originX();
+        double dz = z - t.originZ();
+        double distSq = dx * dx + dz * dz;
         if (distSq >= EDGE_RADIUS * EDGE_RADIUS) {
             return 0.0;
         }
         if (distSq <= FULL_RADIUS * FULL_RADIUS) {
             return 1.0;
         }
-        double t = (EDGE_RADIUS - Math.sqrt(distSq)) / (EDGE_RADIUS - FULL_RADIUS);
-        return smootherstep(t);
+        double s = (EDGE_RADIUS - Math.sqrt(distSq)) / (EDGE_RADIUS - FULL_RADIUS);
+        return smootherstep(s);
     }
 
     private static double smootherstep(double t) {
@@ -115,12 +120,15 @@ public final class GeoChunkGenerator extends ChunkGenerator {
      */
     private void deformChunk(ChunkAccess chunk) {
         ChunkPos chunkPos = chunk.getPos();
+        GeoTransform t = dataset.transform();
 
         // Cheap reject: if the closest point of this chunk to the origin is
         // outside the influence circle, nothing to do.
-        int closestX = Mth.clamp(0, chunkPos.getMinBlockX(), chunkPos.getMaxBlockX());
-        int closestZ = Mth.clamp(0, chunkPos.getMinBlockZ(), chunkPos.getMaxBlockZ());
-        if ((double) closestX * closestX + (double) closestZ * closestZ >= EDGE_RADIUS * EDGE_RADIUS) {
+        int closestX = Mth.clamp(t.originX(), chunkPos.getMinBlockX(), chunkPos.getMaxBlockX());
+        int closestZ = Mth.clamp(t.originZ(), chunkPos.getMinBlockZ(), chunkPos.getMaxBlockZ());
+        double ddx = closestX - t.originX();
+        double ddz = closestZ - t.originZ();
+        if (ddx * ddx + ddz * ddz >= EDGE_RADIUS * EDGE_RADIUS) {
             return;
         }
 

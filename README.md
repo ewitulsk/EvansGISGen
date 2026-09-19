@@ -4,16 +4,24 @@ A NeoForge 1.21.1 mod that will generate Minecraft terrain from real-world GIS
 data (Beatrice, NE → US-77 → Lincoln, NE as the first dataset). See
 [PLAN.md](PLAN.md) for the full implementation plan.
 
-## Current status: Phase 0
+## Current status: Phase 1
 
-Generator skeleton with a proof-of-concept worldgen hook:
+Generator skeleton + global coordinate system:
 
 - `GeoChunkGenerator` wraps a vanilla `ChunkGenerator` (registered as
   `geoworld:geoworld`) and delegates everything to it.
-- As a proof of concept, terrain inside a 500-block circle around world origin
-  `(0, 0)` is forced toward Y=70 (fully flat within 400 blocks, smoothly blended
-  at the rim). Vanilla generation outside the circle is untouched.
-- `GeoDataset` is an empty stub; the offline GIS compiler arrives in Phase 2.
+- `GeoTransform` maps projected geographic coordinates (meters east/north of
+  the projection origin, produced offline by the compiler) to Minecraft block
+  coordinates: `+east -> +x`, `+north -> -z`. Horizontal and vertical scale are
+  independent, and a configurable vertical datum maps real elevation to block Y.
+- `config/geoworld.json` controls where reality is inserted (written with
+  defaults on first run). The proof-of-concept flattening circle from Phase 0
+  is now centered on the configured origin.
+- Debug commands: `/geoworld info`, `/geoworld geo`,
+  `/geoworld geo <east> <north>`.
+- `GeoTransformTest` verifies ten real Beatrice locations (projected to
+  UTM 14N) land at the expected relative block coordinates.
+- `GeoDataset` carries the transform; tile layers arrive in Phase 2.
 
 ## Trying it
 
