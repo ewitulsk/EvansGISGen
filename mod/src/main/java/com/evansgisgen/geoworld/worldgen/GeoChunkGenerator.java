@@ -123,8 +123,12 @@ public final class GeoChunkGenerator extends ChunkGenerator {
         if (tile != null && tile.hasElevation()) {
             int lx = dataset.localCoord(x);
             int lz = dataset.localCoord(z);
+            int height = tile.elevation(lx, lz);
+            if (height == GeoTile.NO_DATA) {
+                return null;
+            }
             double w = tile.hasInfluence() ? tile.influenceWeight(lx, lz) / 255.0 : 1.0;
-            return w <= 0.0 ? null : new GeoTarget(tile.elevation(lx, lz), w);
+            return w <= 0.0 ? null : new GeoTarget(height, w);
         }
         double w = circleInfluence(x, z);
         return w <= 0.0 ? null : new GeoTarget(TARGET_HEIGHT, w);
@@ -285,7 +289,33 @@ public final class GeoChunkGenerator extends ChunkGenerator {
 
     @Override
     public NoiseColumn getBaseColumn(int x, int z, LevelHeightAccessor level, RandomState random) {
-        return delegate.getBaseColumn(x, z, level, random);
+        NoiseColumn column = delegate.getBaseColumn(x, z, level, random);
+        GeoTarget target = geoTarget(x, z);
+        if (target == null) {
+            return column;
+        }
+        int minY = getMinY();
+        int topY = minY + getGenDepth() - 1;
+        int surface = topY;
+        while (surface > minY && column.getBlock(surface).isAir()) {
+            surface--;
+        }
+        int delta = (int) Math.round(Mth.lerp(target.weight(), surface, target.height())) - surface;
+        if (delta == 0) {
+            return column;
+        }
+        BlockState[] shifted = new BlockState[getGenDepth()];
+        for (int y = minY; y <= topY; y++) {
+            int srcY = y - delta;
+            if (srcY < minY) {
+                shifted[y - minY] = FILL_BLOCK;
+            } else if (srcY > topY) {
+                shifted[y - minY] = AIR;
+            } else {
+                shifted[y - minY] = column.getBlock(srcY);
+            }
+        }
+        return new NoiseColumn(minY, shifted);
     }
 
     @Override

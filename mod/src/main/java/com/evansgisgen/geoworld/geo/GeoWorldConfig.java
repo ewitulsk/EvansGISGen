@@ -17,7 +17,7 @@ import org.slf4j.LoggerFactory;
  *
  * <pre>{@code
  * {
- *     "dataset_path": "geoworld/synthetic.geoworld",
+ *     "dataset_path": "geoworld/beatrice.geoworld",
  *     "origin": { "minecraft_x": 0, "minecraft_z": 0 },
  *     "scale": { "horizontal_meters_per_block": 1.0, "vertical_meters_per_block": 1.0 },
  *     "vertical_datum": { "elevation_meters": 0.0, "minecraft_y": 64 }
@@ -103,7 +103,7 @@ public final class GeoWorldConfig {
 
     private static String defaultJson() {
         JsonObject root = new JsonObject();
-        root.addProperty("dataset_path", "geoworld/synthetic.geoworld");
+        root.addProperty("dataset_path", "geoworld/beatrice.geoworld");
         JsonObject origin = new JsonObject();
         origin.addProperty("minecraft_x", GeoTransform.DEFAULT.originX());
         origin.addProperty("minecraft_z", GeoTransform.DEFAULT.originZ());

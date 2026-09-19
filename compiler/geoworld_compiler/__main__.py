@@ -20,6 +20,13 @@ def main(argv: list[str] | None = None) -> int:
     b = sub.add_parser("build", help="compile a .geoworld dataset")
     b.add_argument("--out", required=True, help="output dataset dir, e.g. datasets/synthetic.geoworld")
     b.add_argument("--name", default="unnamed")
+    b.add_argument("--source", choices=["synthetic", "dem"], default="synthetic")
+    b.add_argument("--dem", nargs="+", default=None,
+                   help="DEM raster path(s) (GeoTIFF etc.) for --source dem")
+    b.add_argument("--radius", type=float, default=4000.0,
+                   help="dem: half-extent of the compiled region (m)")
+    b.add_argument("--ramp", type=float, default=500.0,
+                   help="dem: influence ramp width at the coverage edge (m)")
     b.add_argument("--origin-x", type=int, default=0, help="minecraft x of geo origin")
     b.add_argument("--origin-z", type=int, default=0, help="minecraft z of geo origin")
     b.add_argument("--hscale", type=float, default=1.0, help="horizontal meters per block")
@@ -35,7 +42,14 @@ def main(argv: list[str] | None = None) -> int:
                    help="influence fades to vanilla at this radius (m)")
     b.add_argument("--crs", default="EPSG:32614", help="projected CRS (documentation)")
     b.add_argument("--anchor", default=None,
-                   help="optional 'lat,lon' anchoring the geo origin in the CRS")
+                   help="'lat,lon' anchoring the geo origin in the CRS "
+                        "(required for --source dem)")
+
+    fe = sub.add_parser("fetch", help="download DEM rasters from the USGS TNM API")
+    fe.add_argument("--bbox", required=True,
+                    help="'minLon,minLat,maxLon,maxLat' in WGS84 degrees")
+    fe.add_argument("--out", required=True, help="output dir for rasters")
+    fe.add_argument("--dataset", default="Digital Elevation Model (DEM) 1 meter")
 
     f = sub.add_parser("fixture", help="write a known-pattern test tile")
     f.add_argument("--out", required=True, help="output .gwt path")
@@ -46,15 +60,25 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
 
+    if args.command == "fetch":
+        from .fetch import fetch_dem
+
+        min_lon, min_lat, max_lon, max_lat = (
+            float(s) for s in args.bbox.split(","))
+        for p in fetch_dem(min_lon, min_lat, max_lon, max_lat, args.out, args.dataset):
+            print(p)
+        return 0
+
     if args.command == "build":
         from .build import build_dataset
-        from .sources import SyntheticSource
         from .transform import GeoTransform, Projection
 
         projection = None
+        anchor_east = anchor_north = 0.0
         if args.anchor:
             lat, lon = (float(s) for s in args.anchor.split(","))
             projection = Projection(args.crs, lat, lon)
+            anchor_east, anchor_north = projection.anchor_east, projection.anchor_north
 
         transform = GeoTransform(
             origin_x=args.origin_x, origin_z=args.origin_z,
@@ -63,7 +87,27 @@ def main(argv: list[str] | None = None) -> int:
             datum_elevation_meters=args.datum_elevation,
             datum_y=args.datum_y,
         )
-        source = SyntheticSource(args.base_elevation, args.radius_full, args.radius_edge)
+
+        if args.source == "dem":
+            if not args.dem:
+                parser.error("--source dem requires --dem <raster> [<raster> ...]")
+            if projection is None:
+                parser.error("--source dem requires --anchor lat,lon")
+            from .dem import DemSource
+
+            source = DemSource(
+                args.dem,
+                geo_crs=args.crs,
+                anchor_east=anchor_east,
+                anchor_north=anchor_north,
+                half_extent_m=args.radius,
+                ramp_m=args.ramp,
+            )
+        else:
+            from .sources import SyntheticSource
+
+            source = SyntheticSource(args.base_elevation, args.radius_full, args.radius_edge)
+
         out = build_dataset(args.out, name=args.name, transform=transform,
                             source=source, projection=projection)
         print(f"wrote dataset: {out}")

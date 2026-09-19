@@ -13,10 +13,13 @@ dataset). See [PLAN.md](PLAN.md) for the full implementation plan.
 └── format/     # dataset format spec
 ```
 
-## Current status: Phase 2
+## Current status: Phase 3
 
 - `GeoChunkGenerator` wraps a vanilla `ChunkGenerator` (`geoworld:geoworld`)
-  and delegates everything to it, then deforms terrain from geographic data.
+  and delegates everything to it, then deforms terrain from geographic data:
+  `lerp(vanilla, dataset_elevation, influence)` per column, shifting the whole
+  column so strata/caves move with the surface. `getBaseHeight`,
+  `getBaseColumn`, and `getFirstOccupiedHeight` report the adjusted terrain.
 - `GeoTransform` anchors projected meter offsets to block coordinates
   (`+east -> +x`, `+north -> -z`), with independent horizontal/vertical scale
   and a configurable vertical datum.
@@ -24,14 +27,17 @@ dataset). See [PLAN.md](PLAN.md) for the full implementation plan.
   origin/scale. The dataset manifest supplies the authoritative transform.
 - `GeoDataset`/`GeoTile` load `.gwt` binary tiles on demand (guava cache,
   immutable) — `dataset.tileAt(x, z)` + `tile.elevation(lx, lz)` are plain
-  array lookups; no GIS libraries at runtime.
+  array lookups; no GIS libraries at runtime. `-32768` elevation cells are
+  NODATA and fall back to vanilla.
 - `geoworld_compiler` (Python) writes the format: `manifest.json` + 256x256
   tiles with zlib-compressed sections (elevation int16, influence u8,
-  surface/road u8, water bitset). Currently emits synthetic rolling terrain +
-  a circular influence field; real DEM ingestion lands in Phase 3.
-- `datasets/synthetic.geoworld` exercises the full path end-to-end: with the
-  dataset loaded, terrain follows tile data; without it, the Phase 0
-  flattening circle remains as fallback.
+  surface/road u8, water bitset). `dem.py` mosaics + reprojects real elevation
+  rasters (rasterio/pyproj) onto the geo meter grid; `fetch.py` downloads
+  USGS 3DEP 1 m DEM tiles from The National Map.
+- `datasets/beatrice.geoworld` is real USGS 1 m LiDAR terrain for downtown
+  Beatrice, NE (~8 km square, 1024 tiles, 372-428 m real elevation). Spawn is
+  downtown Beatrice; the Big Blue River valley is visible east of the origin.
+  `datasets/synthetic.geoworld` remains as the no-GIS pipeline test.
 - Debug commands: `/geoworld info`, `/geoworld geo`,
   `/geoworld geo <east> <north>`.
 
@@ -42,17 +48,19 @@ gradlew :mod:runClient
 ```
 
 Create a world, select the **GeoWorld** world type. With the copied
-`synthetic.geoworld` dataset, spawn sits inside rolling synthetic terrain
-blending into vanilla at the edge.
+`beatrice.geoworld` dataset, spawn sits on real Beatrice terrain blending
+into vanilla at the dataset edge (~4 km out).
 
 ## Compiler
 
 ```
 cd compiler
 pip install -r requirements.txt
-python -m geoworld_compiler build --out ../datasets/synthetic.geoworld \
-    --name synthetic --anchor 40.2681,-96.7470 \
-    --datum-elevation 381 --base-elevation 381 \
-    --radius-full 800 --radius-edge 1400
-python -m unittest discover -s tests
+python -m geoworld_compiler fetch \
+    --bbox -96.805,40.223,-96.689,40.313 --out ../datasets/raw
+python -m geoworld_compiler build --source dem --dem ../datasets/raw/*.tif \
+    --out ../datasets/beatrice.geoworld --name beatrice \
+    --anchor 40.2681,-96.7470 --datum-elevation 381 --datum-y 64 \
+    --radius 4000 --ramp 500
+python -m pytest tests/
 ```

@@ -21,6 +21,9 @@ __pycache__/
 *.pyc
 *.pyo
 
+# Raw GIS downloads (large; fetched via `geoworld_compiler fetch`)
+datasets/raw/
+
 # OS
 .DS_Store
 Thumbs.db
@@ -28,3 +31,6 @@ Thumbs.db
 # Local
 repo/
 out/
+
+# Compiler debug previews (regenerate via `geoworld_compiler preview`)
+datasets/*/debug/

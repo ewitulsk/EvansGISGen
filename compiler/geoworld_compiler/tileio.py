@@ -17,6 +17,9 @@ TILE_SIZE = 256
 COMP_NONE = 0
 COMP_DEFLATE = 1
 
+# Sentinel written into the elevation layer for columns with no source data.
+NODATA = -32768
+
 # Layer bit values; sections are written in ascending bit order.
 LAYER_BITS = {
     "elevation": 0x01,   # i16[TILE^2]  target block Y per column

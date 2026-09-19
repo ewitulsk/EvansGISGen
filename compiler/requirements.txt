@@ -1,10 +1,16 @@
 # Required for coordinate projection (lat/lon -> projected meters).
 pyproj>=3.6
 
+# Phase 3+: DEM raster ingestion (USGS 3DEP GeoTIFFs etc.).
+rasterio>=1.3
+numpy>=1.26
+
+# Tests.
+pytest>=8.0
+
 # Optional: only needed for `geoworld_compiler preview` (PNG debug renders).
 # pillow>=10.0
 
-# Phase 3+: real GIS ingestion.
-# rasterio>=1.3
+# Later phases: vector GIS ingestion (roads, land use, buildings).
 # geopandas>=1.0
 # shapely>=2.0

@@ -89,7 +89,9 @@ Bitset packing: bit `i` is bit `i % 8` (LSB-first) of byte `i / 8`.
 Notes:
 
 - `elevation` stores final block Y — the compiler applies the vertical datum
-  and scale, so the runtime is a pure lookup.
+  and scale, so the runtime is a pure lookup. Columns with no source data use
+  the sentinel `-32768` (NODATA); readers must treat it as "vanilla" rather
+  than a height.
 - `influence` of 0 means "vanilla"; 255 means "fully geographic". The compiler
   precomputes the field so the runtime does no polygon distance math.
 - Unknown mask bits should be skipped by readers after parsing their section

@@ -1,8 +1,12 @@
 """Elevation/influence sources.
 
-Sources answer questions in dataset geo space (meters east/north of the
-anchor), or `None` for "no data". The real DEM/GIS-backed sources arrive in
-Phase 3; SyntheticSource exists to prove the pipeline end-to-end.
+Source protocol (geo space = meters east/north of the anchor):
+    elevation_m(east, north) -> float | None   (None = no data)
+    influence(east, north)   -> float 0..1
+    extent_m()               -> float   (half-extent of tile coverage square)
+
+SyntheticSource exists to prove the pipeline end-to-end; DemSource (dem.py)
+is the real Phase 3 terrain source.
 """
 
 from __future__ import annotations
@@ -45,3 +49,6 @@ class SyntheticSource:
         if d <= self.radius_full_m:
             return 1.0
         return smootherstep((self.radius_edge_m - d) / (self.radius_edge_m - self.radius_full_m))
+
+    def extent_m(self) -> float:
+        return self.radius_edge_m

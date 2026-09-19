@@ -1,0 +1,35 @@
+{
+  "format_version": 1,
+  "name": "beatrice",
+  "tile_size": 256,
+  "transform": {
+    "origin": {
+      "minecraft_x": 0,
+      "minecraft_z": 0
+    },
+    "scale": {
+      "horizontal_meters_per_block": 1.0,
+      "vertical_meters_per_block": 1.0
+    },
+    "vertical_datum": {
+      "elevation_meters": 381.0,
+      "minecraft_y": 64
+    }
+  },
+  "projection": {
+    "crs": "EPSG:32614",
+    "geo_anchor_east_m": 691569.3902836657,
+    "geo_anchor_north_m": 4459949.58687689
+  },
+  "layers": [
+    "elevation",
+    "influence"
+  ],
+  "tile_count": 1024,
+  "bounds": {
+    "min_tile_x": -16,
+    "max_tile_x": 15,
+    "min_tile_z": -16,
+    "max_tile_z": 15
+  }
+}

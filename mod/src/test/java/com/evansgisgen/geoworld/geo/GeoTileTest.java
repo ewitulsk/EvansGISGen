@@ -4,8 +4,13 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.io.ByteArrayOutputStream;
+import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.util.Arrays;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -74,5 +79,44 @@ class GeoTileTest {
         assertTrue(tile.water(3, 0));
         assertFalse(tile.water(0, 1));                     // i = 256, 256 % 3 != 0
         assertTrue(tile.water(2, 1));                      // i = 258, 258 % 3 == 0
+    }
+
+    /**
+     * Writes a minimal uncompressed .gwt containing only an elevation layer,
+     * then verifies the NO_DATA sentinel round-trips unchanged.
+     */
+    @Test
+    void noDataElevation() throws IOException {
+        int n = 256 * 256;
+        short[] values = new short[n];
+        Arrays.fill(values, (short) GeoTile.NO_DATA);
+        values[0] = 75;
+        values[n - 1] = -12;
+        byte[] elev = new byte[n * 2];
+        ByteBuffer.wrap(elev).order(ByteOrder.BIG_ENDIAN).asShortBuffer().put(values);
+
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        DataOutputStream d = new DataOutputStream(bytes);
+        d.writeInt(0x4757544C);        // "GWTL"
+        d.writeShort(1);               // version
+        d.writeInt(3);                 // tileX
+        d.writeInt(-2);                // tileZ
+        d.writeShort(0x01);            // layer mask: elevation only
+        d.writeShort(0);               // reserved
+        d.writeByte(0);                // codec: COMP_NONE
+        d.writeInt(elev.length);       // raw length
+        d.writeInt(elev.length);       // stored length
+        d.write(elev);
+        d.flush();
+
+        GeoTile tile = GeoTile.parse(bytes.toByteArray(), 256);
+        assertEquals(3, tile.tileX());
+        assertEquals(-2, tile.tileZ());
+        assertTrue(tile.hasElevation());
+        assertFalse(tile.hasInfluence());
+        assertEquals(75, tile.elevation(0, 0));
+        assertEquals(-12, tile.elevation(255, 255));
+        assertEquals(GeoTile.NO_DATA, tile.elevation(1, 0));
+        assertEquals(GeoTile.NO_DATA, tile.elevation(128, 200));
     }
 }

@@ -19,6 +19,9 @@ public final class GeoTile {
     static final int MAGIC = 0x4757544C; // "GWTL"
     static final int VERSION = 1;
 
+    /** Elevation-layer sentinel: the compiler had no source data for this column. */
+    public static final int NO_DATA = Short.MIN_VALUE;
+
     private static final int COMP_NONE = 0;
     private static final int COMP_DEFLATE = 1;
 

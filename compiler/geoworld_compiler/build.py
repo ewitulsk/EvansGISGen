@@ -4,11 +4,19 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
+from typing import Protocol
 
 from .manifest import write_manifest
-from .sources import SyntheticSource
-from .tileio import TILE_SIZE, pack_elevation, tile_filename, write_tile
+from .tileio import NODATA, TILE_SIZE, pack_elevation, tile_filename, write_tile
 from .transform import GeoTransform, Projection
+
+
+class Source(Protocol):
+    """Elevation/influence provider in dataset geo space (see sources.py)."""
+
+    def elevation_m(self, east: float, north: float) -> float | None: ...
+    def influence(self, east: float, north: float) -> float: ...
+    def extent_m(self) -> float: ...
 
 
 def build_dataset(
@@ -16,7 +24,7 @@ def build_dataset(
     *,
     name: str,
     transform: GeoTransform,
-    source: SyntheticSource,
+    source: Source,
     projection: Projection | None = None,
 ) -> Path:
     """Emit a .geoworld dataset directory. Returns the dataset dir."""
@@ -24,8 +32,8 @@ def build_dataset(
     tiles_dir = out / "tiles"
     tiles_dir.mkdir(parents=True, exist_ok=True)
 
-    # Tile coverage: bounding box of the influence edge circle, in tiles.
-    edge_blocks = math.ceil(source.radius_edge_m / transform.horizontal_meters_per_block)
+    # Tile coverage: square bounding box of the source extent, in tiles.
+    edge_blocks = math.ceil(source.extent_m() / transform.horizontal_meters_per_block)
     t_min_x = math.floor((transform.origin_x - edge_blocks) / TILE_SIZE)
     t_max_x = math.floor((transform.origin_x + edge_blocks) / TILE_SIZE)
     t_min_z = math.floor((transform.origin_z - edge_blocks) / TILE_SIZE)
@@ -46,13 +54,19 @@ def build_dataset(
                     east = transform.east_meters(bx)
                     w = source.influence(east, north)
                     i = lz * TILE_SIZE + lx
-                    elevation[i] = transform.block_y(source.elevation_m(east, north))
+                    elev = source.elevation_m(east, north)
+                    elevation[i] = NODATA if elev is None else transform.block_y(elev)
+                    # No-data columns are pure vanilla regardless of influence.
+                    if elev is None:
+                        w = 0.0
                     influence[i] = min(255, max(0, int(w * 255.0 + 0.5)))
                     any_influence = any_influence or w > 0.0
             if any_influence:
                 write_tile(tiles_dir / tile_filename(tx, tz), tx, tz,
                            {"elevation": pack_elevation(elevation), "influence": bytes(influence)})
                 written.append((tx, tz))
+            print(f"  tile {tx:+d},{tz:+d}: {'written' if any_influence else 'skipped'}",
+                  flush=True)
 
     write_manifest(out, name=name, transform=transform, projection=projection,
                    layers=["elevation", "influence"], tiles=written)
