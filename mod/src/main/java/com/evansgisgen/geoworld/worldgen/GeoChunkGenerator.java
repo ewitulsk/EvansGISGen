@@ -2,6 +2,7 @@ package com.evansgisgen.geoworld.worldgen;
 
 import com.evansgisgen.geoworld.GeoWorldMod;
 import com.evansgisgen.geoworld.geo.GeoDataset;
+import com.evansgisgen.geoworld.landmark.LandmarkIndex;
 import com.evansgisgen.geoworld.geo.GeoTile;
 import com.evansgisgen.geoworld.geo.GeoTransform;
 import com.mojang.datafixers.util.Pair;
@@ -299,11 +300,25 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
         int h = (int) Math.round(Mth.lerp(target.weight(), vanillaHeight, target.height()));
         // Heightmap types that count fluids (WORLD_SURFACE, MOTION_BLOCKING*)
         // report the water surface on wet columns; OCEAN_FLOOR* report the bed.
-        if (target.waterDepth() > 0 && type != Heightmap.Types.OCEAN_FLOOR
-                && type != Heightmap.Types.OCEAN_FLOOR_WG) {
-            h += target.waterDepth();
+        // Wet road columns carry a paved deck one block above the waterline —
+        // it's solid, so every type sees it as the column top.
+        int depth = target.waterDepth();
+        if (depth > 0) {
+            if (isWetRoadColumn(x, z)) {
+                h += depth + 1;
+            } else if (type != Heightmap.Types.OCEAN_FLOOR
+                    && type != Heightmap.Types.OCEAN_FLOOR_WG) {
+                h += depth;
+            }
         }
         return h;
+    }
+
+    /** True where a compiled road crosses water — paveRoads decks these. */
+    private boolean isWetRoadColumn(int x, int z) {
+        GeoTile tile = dataset.tileAt(x, z).orElse(null);
+        return tile != null && tile.hasRoad()
+                && tile.roadClass(dataset.localCoord(x), dataset.localCoord(z)) != ROAD_NONE;
     }
 
     /**
@@ -459,8 +474,9 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
         // Geographic passes run before vanilla decoration: land-use surfaces
         // and building shells replace the top terrain, then roads are paved
         // so vegetation cannot plant on them.
+        LandmarkIndex landmarks = landmarks(level.registryAccess());
         applySurface(chunk);
-        buildBuildings(chunk);
+        buildBuildings(chunk, landmarks);
         paveRoads(chunk);
         delegate.applyBiomeDecoration(level, chunk, structureManager);
         plantForest(level, chunk);
@@ -468,6 +484,32 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
         // already-decorated neighbors may have grown trees into road or
         // building cells — clear anything that isn't terrain or structure.
         clearCover(chunk);
+        // Curated .nbt landmarks place last, sliced to this chunk's bounds
+        // (Phase 9) — nothing else may overwrite them.
+        landmarks.placeChunk(level, chunk, GeoChunkGenerator::isFeatureOverhang);
+    }
+
+    /**
+     * Lazily resolves the dataset's landmarks.json + .nbt templates — needs
+     * the block registry, which isn't available at generator construction.
+     */
+    private volatile LandmarkIndex landmarkIndex;
+
+    public LandmarkIndex landmarks(RegistryAccess registryAccess) {
+        LandmarkIndex index = landmarkIndex;
+        if (index == null) {
+            synchronized (this) {
+                index = landmarkIndex;
+                if (index == null) {
+                    index = dataset.isEmpty()
+                            ? LandmarkIndex.EMPTY
+                            : LandmarkIndex.load(dataset,
+                                    registryAccess.lookupOrThrow(Registries.BLOCK));
+                    landmarkIndex = index;
+                }
+            }
+        }
+        return index;
     }
 
     /**
@@ -530,9 +572,10 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
      * floor slab on the terrain top, perimeter walls with a window pattern
      * up to {@code levels * 3 + 1} above ground, and a flat roof across the
      * whole footprint. Boundary detection uses dataset lookups so walls on
-     * tile/chunk borders stay consistent. Water/road cells are skipped.
+     * tile/chunk borders stay consistent. Water/road cells are skipped, as
+     * are cells a landmark claims (Phase 9 — no shell under a curated build).
      */
-    private void buildBuildings(ChunkAccess chunk) {
+    private void buildBuildings(ChunkAccess chunk, LandmarkIndex landmarks) {
         if (dataset.isEmpty()) {
             return;
         }
@@ -556,7 +599,8 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
                     continue;
                 }
                 if (tile.waterDepth(tlx, tlz) > 0
-                        || tile.roadClass(tlx, tlz) != ROAD_NONE) {
+                        || tile.roadClass(tlx, tlz) != ROAD_NONE
+                        || landmarks.suppressesBuildingAt(x, z)) {
                     continue;
                 }
                 int ground = groundHeight(chunk, pos, x, z, minY, topY);
@@ -665,8 +709,10 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
     /**
      * Replaces the top solid blocks of every compiled road column with the
      * class's surface block. The DEM already holds the pavement elevation,
-     * so no carving is needed. Water columns are skipped — bridges are a
-     * later stage.
+     * so no carving is needed. Where a road crosses water the channel bed
+     * is carved below grade, so instead of skipping the cell we pave a
+     * deck one block above the waterline (bed + depth + 1 ≈ road grade):
+     * a flat culvert/bridge slab with the water kept underneath.
      */
     private void paveRoads(ChunkAccess chunk) {
         if (dataset.isEmpty()) {
@@ -696,7 +742,23 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
                     continue;
                 }
                 if (tile.waterDepth(tlx, tlz) > 0) {
-                    continue;  // bridges are a later stage
+                    // Deck one block above the column's actual waterline
+                    // (bed + depth ≈ road grade at full influence; the
+                    // scan stays consistent under blending).
+                    for (int y = topY; y > minY; y--) {
+                        BlockState cur = chunk.getBlockState(pos.set(x, y, z));
+                        if (cur.isAir()) {
+                            continue;
+                        }
+                        if (!cur.getFluidState().isEmpty()
+                                && y + 1 <= topY) {
+                            chunk.setBlockState(pos.set(x, y + 1, z),
+                                                roadBlock(road), false);
+                            modified = true;
+                        }
+                        break;
+                    }
+                    continue;
                 }
                 int surface = groundHeight(chunk, pos, x, z, minY, topY);
                 if (surface <= minY) {
@@ -748,6 +810,19 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
                 int tlx = dataset.localCoord(x);
                 int tlz = dataset.localCoord(z);
                 if (tile.waterDepth(tlx, tlz) > 0) {
+                    // Wet road cells carry a deck — clear any bank-side
+                    // canopy overhanging it. Other wet cells are left alone.
+                    if (tile.roadClass(tlx, tlz) != ROAD_NONE) {
+                        for (int y = topY; y > minY; y--) {
+                            BlockState cur = chunk.getBlockState(pos.set(x, y, z));
+                            if (isFeatureOverhang(cur)) {
+                                chunk.setBlockState(pos, AIR, false);
+                                modified = true;
+                            } else if (!cur.isAir()) {
+                                break;  // reached the deck or waterline
+                            }
+                        }
+                    }
                     continue;
                 }
                 if (tile.buildingClass(tlx, tlz) != BUILDING_NONE) {
@@ -885,19 +960,27 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
             changed = true;
         }
         // Road columns report the paved surface (same block swap paveRoads
-        // performs during decoration).
+        // performs during decoration); wet road columns report the deck.
         GeoTile roadTile = dataset.tileAt(x, z).orElse(null);
-        if (depth == 0 && roadTile != null && roadTile.hasRoad()) {
+        if (roadTile != null && roadTile.hasRoad()) {
             int road = roadTile.roadClass(dataset.localCoord(x), dataset.localCoord(z));
             if (road != ROAD_NONE) {
                 BlockState roadBlock = roadBlock(road);
                 int bed = surface + delta;
-                for (int y = bed, paved = 0; y > minY && paved < 3; y--) {
-                    BlockState s = shifted[y - minY];
-                    if (!s.isAir() && s.getFluidState().isEmpty()) {
-                        shifted[y - minY] = roadBlock;
-                        paved++;
+                if (depth > 0) {
+                    int deck = bed + depth + 1;
+                    if (deck <= topY) {
+                        shifted[deck - minY] = roadBlock;
                         changed = true;
+                    }
+                } else {
+                    for (int y = bed, paved = 0; y > minY && paved < 3; y--) {
+                        BlockState s = shifted[y - minY];
+                        if (!s.isAir() && s.getFluidState().isEmpty()) {
+                            shifted[y - minY] = roadBlock;
+                            paved++;
+                            changed = true;
+                        }
                     }
                 }
             }

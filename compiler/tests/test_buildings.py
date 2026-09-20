@@ -51,7 +51,7 @@ def test_class_and_default_levels(tmp_path, projection):
         _way(4, {"building": "shed"}, _poly(60.0, 60.0, 5.0)),
         _way(5, {"building": "yes"}, _poly(-60.0, 0.0, 10.0)),
     ])
-    src = BuildingSource(path, projection, extent_m=200.0)
+    src = BuildingSource(path, projection, bounds=(-200.0, -200.0, 200.0, 200.0))
     assert src.building_class(0.0, 0.0) == BUILDING_RESIDENTIAL
     assert src.building_levels(0.0, 0.0) == 2
     assert src.building_class(60.0, 0.0) == BUILDING_INDUSTRIAL
@@ -70,7 +70,7 @@ def test_levels_tag_override(tmp_path, projection):
         _way(2, {"building": "commercial", "height": "15"},
              _poly(60.0, 0.0, 10.0)),
     ])
-    src = BuildingSource(path, projection, extent_m=200.0)
+    src = BuildingSource(path, projection, bounds=(-200.0, -200.0, 200.0, 200.0))
     assert src.building_class(0.0, 0.0) == BUILDING_RESIDENTIAL
     assert src.building_levels(0.0, 0.0) == 6
     # height 15 m -> 5 floors.
@@ -83,7 +83,7 @@ def test_open_ring_is_closed(tmp_path, projection):
     path = _write(tmp_path, [
         _way(1, {"building": "house"}, ring),
     ])
-    src = BuildingSource(path, projection, extent_m=200.0)
+    src = BuildingSource(path, projection, bounds=(-200.0, -200.0, 200.0, 200.0))
     assert src.building_class(10.0, 10.0) == BUILDING_RESIDENTIAL
 
 
@@ -107,7 +107,7 @@ def test_ms_footprints_generic(tmp_path, projection):
         (_poly(0.0, 0.0, 10.0), -1.0),          # no height -> default levels
         (_poly(60.0, 0.0, 10.0), 9.0),          # 9 m -> 3 floors
     ])
-    src = BuildingSource(None, projection, extent_m=200.0,
+    src = BuildingSource(None, projection, bounds=(-200.0, -200.0, 200.0, 200.0),
                          ms_json_path=ms)
     assert src.building_class(0.0, 0.0) == BUILDING_GENERIC
     assert src.building_levels(0.0, 0.0) == 2
@@ -123,7 +123,7 @@ def test_osm_overrides_ms(tmp_path, projection):
              _poly(0.0, 0.0, 10.0)),
     ])
     ms = _ms(tmp_path, [(_poly(0.0, 0.0, 12.0), -1.0)])
-    src = BuildingSource(osm, projection, extent_m=200.0, ms_json_path=ms)
+    src = BuildingSource(osm, projection, bounds=(-200.0, -200.0, 200.0, 200.0), ms_json_path=ms)
     assert src.building_class(0.0, 0.0) == BUILDING_CIVIC
     assert src.building_levels(0.0, 0.0) == 4
     # MS polygon sticks out past the OSM one: residue stays GENERIC.
@@ -132,4 +132,4 @@ def test_osm_overrides_ms(tmp_path, projection):
 
 def test_requires_at_least_one_input(tmp_path, projection):
     with pytest.raises(ValueError):
-        BuildingSource(None, projection, extent_m=200.0)
+        BuildingSource(None, projection, bounds=(-200.0, -200.0, 200.0, 200.0))

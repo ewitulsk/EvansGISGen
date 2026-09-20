@@ -35,8 +35,8 @@ class Field(Protocol):
         """Influence weight 0..1 at geo coordinates (east, north) meters."""
         ...
 
-    def extent_m(self) -> float:
-        """Half-extent of a square around the origin containing all weight > 0."""
+    def bounds(self) -> tuple[float, float, float, float]:
+        """(min_east, min_north, max_east, max_north) containing all weight > 0."""
         ...
 
 
@@ -58,8 +58,9 @@ class BoxRamp:
             return 0.0
         return smootherstep(min(1.0, edge_dist / self.ramp_m))
 
-    def extent_m(self) -> float:
-        return self.half_extent_m
+    def bounds(self) -> tuple[float, float, float, float]:
+        e = self.half_extent_m
+        return (-e, -e, e, e)
 
 
 class DiscRamp:
@@ -80,8 +81,9 @@ class DiscRamp:
             return 1.0
         return smootherstep((self.edge_m - d) / (self.edge_m - self.full_m))
 
-    def extent_m(self) -> float:
-        return math.hypot(self.center_east, self.center_north) + self.edge_m
+    def bounds(self) -> tuple[float, float, float, float]:
+        return (self.center_east - self.edge_m, self.center_north - self.edge_m,
+                self.center_east + self.edge_m, self.center_north + self.edge_m)
 
 
 class CorridorRamp:
@@ -89,24 +91,31 @@ class CorridorRamp:
 
     For linear features like US-77: a strip of full geographic control
     along the centerline with a smootherstep falloff into vanilla on each
-    side. `points` are (east, north) geo meters.
+    side. `polylines` are (east, north) geo-meter point sequences — one
+    per road way, so disconnected ways never create phantom segments.
     """
 
-    def __init__(self, points: Sequence[tuple[float, float]],
+    def __init__(self, polylines: Sequence[Sequence[tuple[float, float]]],
                  full_m: float, ramp_m: float):
-        if len(points) < 2:
-            raise ValueError("corridor needs at least two points")
-        self.points = list(points)
+        lines = [list(p) for p in polylines if len(p) >= 2]
+        if not lines:
+            raise ValueError("corridor needs at least one two-point line")
+        self.polylines = lines
         self.full_m = full_m
         self.ramp_m = ramp_m
         reach = full_m + ramp_m
-        self._extent = max(math.hypot(e, n) for e, n in points) + reach
+        all_pts = [p for line in lines for p in line]
+        self._bounds = (min(e for e, _ in all_pts) - reach,
+                        min(n for _, n in all_pts) - reach,
+                        max(e for e, _ in all_pts) + reach,
+                        max(n for _, n in all_pts) + reach)
         # Bounding box per segment, inflated by reach, for cheap rejection.
         self._segments = []
-        for (e0, n0), (e1, n1) in zip(points, points[1:]):
-            bbox = (min(e0, e1) - reach, min(n0, n1) - reach,
-                    max(e0, e1) + reach, max(n0, n1) + reach)
-            self._segments.append((e0, n0, e1 - e0, n1 - n0, bbox))
+        for points in lines:
+            for (e0, n0), (e1, n1) in zip(points, points[1:]):
+                bbox = (min(e0, e1) - reach, min(n0, n1) - reach,
+                        max(e0, e1) + reach, max(n0, n1) + reach)
+                self._segments.append((e0, n0, e1 - e0, n1 - n0, bbox))
 
     def _dist(self, east: float, north: float) -> float:
         best = math.inf
@@ -129,8 +138,61 @@ class CorridorRamp:
             return 1.0
         return smootherstep(1.0 - (d - self.full_m) / self.ramp_m)
 
-    def extent_m(self) -> float:
-        return self._extent
+    def bounds(self) -> tuple[float, float, float, float]:
+        return self._bounds
+
+
+class RasterField:
+    """Influence field sampled from a precomputed weight grid.
+
+    Analytic fields like CorridorRamp cost a segment loop per query; over a
+    dataset-sized cell loop that dominates build time. This field bakes any
+    distance-derived weight into a coarse grid (weights stored as 0..255
+    bytes) — the same trick the raster sources use for classifications.
+    """
+
+    def __init__(self, grid, bounds: tuple[float, float, float, float],
+                 cell_m: float):
+        self._grid = grid          # uint8 weights 0..255
+        self._bounds = bounds
+        self._inv = 1.0 / cell_m
+
+    def weight(self, east: float, north: float) -> float:
+        col = math.floor((east - self._bounds[0]) * self._inv)
+        row = math.floor((self._bounds[3] - north) * self._inv)
+        if (row < 0 or col < 0 or row >= self._grid.shape[0]
+                or col >= self._grid.shape[1]):
+            return 0.0
+        return self._grid[row, col] * (1.0 / 255.0)
+
+    def bounds(self) -> tuple[float, float, float, float]:
+        return self._bounds
+
+
+def corridor_field(polylines: Sequence[Sequence[tuple[float, float]]],
+                   bounds: tuple[float, float, float, float],
+                   full_m: float, ramp_m: float,
+                   cell_m: float = 8.0) -> RasterField:
+    """Rasterize corridor polylines into a weight grid: distance transform
+    from the centerlines, then a smootherstep ramp — identical semantics to
+    CorridorRamp but O(1) per query."""
+    import numpy as np
+    from affine import Affine
+    from rasterio.features import rasterize
+    from scipy.ndimage import distance_transform_edt
+
+    e0, n0, e1, n1 = bounds
+    shape = (math.ceil((n1 - n0) / cell_m), math.ceil((e1 - e0) / cell_m))
+    transform = Affine(cell_m, 0.0, e0, 0.0, -cell_m, n1)
+    mask = rasterize(
+        [({"type": "LineString", "coordinates": [list(p) for p in line]}, 1)
+         for line in polylines if len(line) >= 2],
+        out_shape=shape, transform=transform, dtype=np.uint8)
+    dist = distance_transform_edt(mask == 0) * cell_m
+    t = np.clip(1.0 - (dist - full_m) / ramp_m, 0.0, 1.0)
+    grid = np.round(t * t * t * (t * (t * 6.0 - 15.0) + 10.0) * 255.0
+                    ).astype(np.uint8)
+    return RasterField(grid, bounds, cell_m)
 
 
 def combine_max(*fields: Field) -> Field:
@@ -151,5 +213,9 @@ class _Combined:
     def weight(self, east: float, north: float) -> float:
         return self._op(f.weight(east, north) for f in self._fields)
 
-    def extent_m(self) -> float:
-        return max((f.extent_m() for f in self._fields), default=0.0)
+    def bounds(self) -> tuple[float, float, float, float]:
+        bs = [f.bounds() for f in self._fields]
+        if not bs:
+            return (0.0, 0.0, 0.0, 0.0)
+        return (min(b[0] for b in bs), min(b[1] for b in bs),
+                max(b[2] for b in bs), max(b[3] for b in bs))

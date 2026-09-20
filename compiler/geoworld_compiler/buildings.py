@@ -181,18 +181,20 @@ class BuildingSource:
     """
 
     def __init__(self, osm_json_path: str | Path | None,
-                 projection: Projection, extent_m: float,
+                 projection: Projection,
+                 bounds: tuple[float, float, float, float],
                  resolution_m: float = 1.0,
                  ms_json_path: str | Path | None = None):
         if osm_json_path is None and ms_json_path is None:
             raise ValueError("BuildingSource needs at least one input")
 
-        self.extent_m = extent_m
+        self.bounds = bounds
         self.resolution_m = resolution_m
-        size = math.ceil(2.0 * extent_m / resolution_m)
-        transform = Affine(resolution_m, 0.0, -extent_m,
-                           0.0, -resolution_m, extent_m)
-        self._size = size
+        e0, n0, e1, n1 = bounds
+        self._shape = (math.ceil((n1 - n0) / resolution_m),
+                       math.ceil((e1 - e0) / resolution_m))
+        transform = Affine(resolution_m, 0.0, e0,
+                           0.0, -resolution_m, n1)
 
         # Group footprints by (class, levels, priority) — one rasterize per
         # distinct combo, painted in ascending priority order.
@@ -235,12 +237,12 @@ class BuildingSource:
                 coords = [projection.to_geo(p["lat"], p["lon"]) for p in geom]
                 add(coords, (cls, levels, prio))
 
-        building = np.zeros((size, size), dtype=np.uint8)
-        b_levels = np.zeros((size, size), dtype=np.uint8)
+        building = np.zeros(self._shape, dtype=np.uint8)
+        b_levels = np.zeros(self._shape, dtype=np.uint8)
         for (cls, levels, _prio), geoms in sorted(groups.items(),
                                                 key=lambda kv: kv[0][2]):
             mask = rasterize([(g, 1) for g in geoms],
-                             out_shape=(size, size), transform=transform,
+                             out_shape=self._shape, transform=transform,
                              fill=0, all_touched=True, dtype=np.uint8).astype(bool)
             building[mask] = cls
             b_levels[mask] = levels
@@ -249,9 +251,9 @@ class BuildingSource:
         self._levels = b_levels
 
     def _cell(self, east: float, north: float) -> tuple[int, int] | None:
-        col = math.floor((east + self.extent_m) / self.resolution_m)
-        row = math.floor((self.extent_m - north) / self.resolution_m)
-        if row < 0 or col < 0 or row >= self._size or col >= self._size:
+        col = math.floor((east - self.bounds[0]) / self.resolution_m)
+        row = math.floor((self.bounds[3] - north) / self.resolution_m)
+        if row < 0 or col < 0 or row >= self._shape[0] or col >= self._shape[1]:
             return None
         return row, col
 

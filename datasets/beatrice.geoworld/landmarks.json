@@ -1,0 +1,20 @@
+{
+  "landmarks": [
+    {
+      "id": "demo_house",
+      "template": "demo_house.nbt",
+      "position": {
+        "east": 200.0,
+        "north": -60.0
+      },
+      "anchor": [
+        5,
+        0,
+        0
+      ],
+      "rotation": "NONE",
+      "terrain": "LEVEL_FOUNDATION",
+      "replaces_building": "ms:demo"
+    }
+  ]
+}

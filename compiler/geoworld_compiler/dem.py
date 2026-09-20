@@ -37,28 +37,40 @@ class DemSource:
         geo_crs: str,
         anchor_east: float,
         anchor_north: float,
-        half_extent_m: float,
+        bounds_m: tuple[float, float, float, float] | None = None,
+        half_extent_m: float | None = None,
         ramp_m: float,
         resolution_m: float = 1.0,
         influence: Field | None = None,
     ):
         self.anchor_east = anchor_east
         self.anchor_north = anchor_north
-        self.half_extent_m = half_extent_m
         self.ramp_m = ramp_m
         self.resolution_m = resolution_m
-        # Influence is a composable field (influence.py); default = the
-        # coverage box ramp. Corridors/regions are combined via combine_max.
-        self._influence_field = influence or BoxRamp(half_extent_m, ramp_m)
-        self._extent_m = max(half_extent_m, self._influence_field.extent_m())
+        # bounds_m: (min_east, min_north, max_east, max_north) of the sampled
+        # region in geo meters — rectangular so corridors stay narrow.
+        # half_extent_m remains as the square shorthand.
+        if bounds_m is None:
+            if half_extent_m is None:
+                raise ValueError("DemSource needs bounds_m or half_extent_m")
+            bounds_m = (-half_extent_m, -half_extent_m,
+                        half_extent_m, half_extent_m)
+        # Influence is a composable field (influence.py); default = a box
+        # ramp over the sampled rect. Corridors/regions compose via combine_max.
+        if influence is None:
+            influence = BoxRamp(max(abs(bounds_m[0]), abs(bounds_m[1]),
+                                    abs(bounds_m[2]), abs(bounds_m[3])), ramp_m)
+        self._influence_field = influence
+        fb = influence.bounds()
+        self._bounds = (min(bounds_m[0], fb[0]), min(bounds_m[1], fb[1]),
+                        max(bounds_m[2], fb[2]), max(bounds_m[3], fb[3]))
 
-        # Pad the sampling grid past the influence extent so boundary tiles
-        # (rounded up to 256-block edges) still have real data to read.
-        pad = half_extent_m + TILE_SIZE
-        x0 = anchor_east - pad
-        x1 = anchor_east + pad
-        y0 = anchor_north - pad
-        y1 = anchor_north + pad
+        # Pad the sampling grid past the bounds so boundary tiles (rounded
+        # up to 256-block edges) still have real data to read.
+        x0 = anchor_east + bounds_m[0] - TILE_SIZE
+        y0 = anchor_north + bounds_m[1] - TILE_SIZE
+        x1 = anchor_east + bounds_m[2] + TILE_SIZE
+        y1 = anchor_north + bounds_m[3] + TILE_SIZE
         self._x0, self._y1 = x0, y1  # west/north edges of the geo grid
 
         srcs = [rasterio.open(p) for p in tif_paths]
@@ -98,13 +110,13 @@ class DemSource:
             fillnodata(grid, mask=valid.astype(np.uint8))
         self._grid = grid
 
-    def extent_m(self) -> float:
-        """Half-extent of the square coverage region, in geo meters.
+    def bounds(self) -> tuple[float, float, float, float]:
+        """(min_e, min_n, max_e, max_n) coverage rect in geo meters.
 
         Covers the influence field's reach (e.g. a corridor extending past
         the DEM box), not just the elevation source itself.
         """
-        return self._extent_m
+        return self._bounds
 
     def elevation_m(self, east: float, north: float) -> float | None:
         col = math.floor((self.anchor_east + east - self._x0) / self.resolution_m)

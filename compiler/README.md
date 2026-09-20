@@ -15,12 +15,34 @@ Run from this directory (`compiler/`).
 ## Commands
 
 ```
-# Compile a dataset (currently synthetic terrain + circular influence;
-# real DEM/GIS sources land in Phase 3+)
+# Compile a dataset (synthetic terrain + circular influence)
 python -m geoworld_compiler build --out ../datasets/synthetic.geoworld \
     --name synthetic --anchor 40.2681,-96.7470 \
     --datum-elevation 381 --base-elevation 381 \
     --radius-full 800 --radius-edge 1400
+
+# Real build: DEM + all GIS layers + the US-77 corridor.
+# --bounds is the dataset rect in geo meters (default +-radius square);
+# --corridor adds a CorridorRamp strip along motorway/trunk ways in --roads.
+python -m geoworld_compiler build --source dem \
+    --dem ../datasets/raw/USGS_1M_14_*.tif \
+    --anchor 40.2681,-96.7470 --crs EPSG:32614 \
+    --radius 4000 --ramp 600 \
+    --bounds "-4600,-7300,4600,23800" --corridor \
+    --hydro ../datasets/raw/water_corridor.json \
+    --roads ../datasets/raw/roads_corridor.json \
+    --landuse ../datasets/raw/landuse_corridor.json \
+    --buildings ../datasets/raw/buildings_corridor.json \
+    --ms-buildings ../datasets/raw/buildings_ms_corridor.json \
+    --out ../datasets/beatrice.geoworld --name beatrice
+
+# Data fetches (all take --bbox 'minLon,minLat,maxLon,maxLat')
+python -m geoworld_compiler fetch              --bbox ... --out DIR   # USGS 1 m DEM
+python -m geoworld_compiler fetch-water        --bbox ... --out FILE  # OSM waterways
+python -m geoworld_compiler fetch-roads        --bbox ... --out FILE  # OSM highways
+python -m geoworld_compiler fetch-landuse      --bbox ... --out FILE  # OSM land use
+python -m geoworld_compiler fetch-buildings    --bbox ... --out FILE  # OSM buildings
+python -m geoworld_compiler fetch-buildings-ms --bbox ... --out FILE  # MS GlobalML
 
 # Write a known-pattern .gwt tile (consumed by the mod's GeoTileTest)
 python -m geoworld_compiler fixture --out ../mod/src/test/resources/fixture.gwt
@@ -29,7 +51,7 @@ python -m geoworld_compiler fixture --out ../mod/src/test/resources/fixture.gwt
 python -m geoworld_compiler preview --dataset ../datasets/synthetic.geoworld
 
 # Tests
-python -m unittest discover -s tests -v
+python -m pytest tests/ -q
 ```
 
 ## Layout
@@ -37,7 +59,14 @@ python -m unittest discover -s tests -v
 - `transform.py` — mirror of the mod's `GeoTransform` + `Projection` (pyproj)
 - `tileio.py` — `.gwt` binary writer/reader
 - `manifest.py` — `manifest.json` writer
-- `sources.py` — elevation/influence sources (synthetic now, DEM later)
-- `build.py` — tile coverage + sampling + emission
+- `influence.py` — composable fields: `BoxRamp`, `DiscRamp`, `CorridorRamp`,
+  `RasterField` (rasterized corridor weights), `combine_max`/`combine_sum`
+- `sources.py` — synthetic elevation/influence source
+- `dem.py` — DEM mosaic + reproject + resample onto the geo grid
+- `hydro.py` / `roads.py` / `landuse.py` / `buildings.py` — OSM/MS vector
+  sources rasterized into per-cell layers over the dataset rect
+- `fetch.py` — USGS TNM DEM downloader; Overpass fetchers live beside their
+  sources
+- `build.py` — tile coverage (rect bounds) + sampling + emission
 - `fixture.py` — deterministic test tile for cross-language format tests
 - `preview.py` — PNG debug renders

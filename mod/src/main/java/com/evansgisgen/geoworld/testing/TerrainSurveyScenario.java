@@ -49,6 +49,9 @@ public final class TerrainSurveyScenario {
             {3300, -600}, {3500, 0}, {3600, 0}, {3700, 0}, {3800, 0}, {3900, 0},
             // Big Blue River channel (Phase 5): compiled water_depth > 0.
             {1243, 1782}, {-638, 501}, {2100, 824},
+            // Road-deck crossings (Phase 6 fix): road class > 0 AND
+            // water_depth > 0 — the road must deck over the waterline.
+            {57, 1279}, {426, -2658},
             // Roads (Phase 6): US-77 marking/asphalt downtown, sidewalk/curb,
             // and an unpaved track.
             {20, 0}, {13, 0}, {130, 0}, {132, 0}, {923, 1078},
@@ -56,6 +59,9 @@ public final class TerrainSurveyScenario {
             {6, 3522}, {660, 1179}, {0, 1638},
             // Buildings (Phase 8): civic, commercial, residential downtown.
             {62, 0}, {6, 143}, {114, 0},
+            // Landmark (Phase 9): the demo house at (200, 60) — sample a
+            // roof column so its chunks generate.
+            {200, 64},
             {5000, 0}, {-5000, -5000},
     };
 
@@ -92,7 +98,7 @@ public final class TerrainSurveyScenario {
                                 BlockState top, int waterInTop24, int target,
                                 double weight, int waterDepth, int roadClass,
                                 int surfaceClass, int buildingClass,
-                                int buildingLevels, String biome,
+                                int buildingLevels, String biome, boolean landmark,
                                 int vanilla, int expected, List<String> topBlocks) {}
 
     private void run(MinecraftServer server) {
@@ -127,9 +133,15 @@ public final class TerrainSurveyScenario {
         net.minecraft.world.level.levelgen.RandomState randomState =
                 level.getChunkSource().randomState();
 
+        com.evansgisgen.geoworld.landmark.LandmarkIndex landmarkIndex =
+                gen instanceof com.evansgisgen.geoworld.worldgen.GeoChunkGenerator geo
+                        ? geo.landmarks(level.registryAccess())
+                        : com.evansgisgen.geoworld.landmark.LandmarkIndex.EMPTY;
+
         List<ColumnReport> reports = new ArrayList<>();
         for (int[] p : SAMPLES) {
-            reports.add(survey(level, dataset, delegate, randomState, p[0], p[1]));
+            reports.add(survey(level, dataset, delegate, randomState,
+                    landmarkIndex, p[0], p[1]));
         }
         LOGGER.info("GEOWORLD-SURVEY-END");
 
@@ -147,8 +159,9 @@ public final class TerrainSurveyScenario {
             // timing-dependent to observe. On wet columns the heightmaps
             // count the water column, so measure the bed with OCEAN_FLOOR.
             // Building shells legitimately rise above terrain — covered by
-            // building_shell_* instead.
-            if (r.buildingClass > 0) {
+            // building_shell_* instead. Landmark columns place templates —
+            // covered by landmark_demo_house.
+            if (r.buildingClass > 0 || r.landmark) {
                 continue;
             }
             int measured = r.waterDepth > 0 ? r.oceanY : r.terrainY;
@@ -172,7 +185,7 @@ public final class TerrainSurveyScenario {
         // motion-blocking heightmap reports the water top, not the bed).
         for (ColumnReport r : reports) {
             if (r.expected != GeoTile.NO_DATA && r.waterDepth == 0
-                    && r.buildingClass == 0) {
+                    && r.buildingClass == 0 && !r.landmark) {
                 pass &= check(String.format("blend_matches_field_%d_%d", r.x, r.z),
                         Math.abs(r.terrainY - r.expected) <= 12);
             }
@@ -180,10 +193,26 @@ public final class TerrainSurveyScenario {
         // Phase 5: compiled water columns must actually hold water, with the
         // surface at bed + depth (<= 1 block of rounding slack).
         for (ColumnReport r : reports) {
-            if (r.waterDepth > 0 && r.weight >= 0.98 && delegate != null) {
+            if (r.waterDepth > 0 && r.weight >= 0.98 && delegate != null
+                    && r.roadClass == 0) {
                 pass &= check(String.format("water_surface_%d_%d", r.x, r.z),
                         (r.top.is(Blocks.WATER) || r.top.is(Blocks.ICE))
                                 && Math.abs(r.topY - (r.target + r.waterDepth)) <= 1);
+            }
+        }
+        // Road-deck crossings: a wet road column must carry the class's
+        // block one block above the waterline, with water kept below it.
+        for (ColumnReport r : reports) {
+            if (r.waterDepth > 0 && r.roadClass > 0 && r.weight >= 0.98
+                    && delegate != null) {
+                BlockState roadBlock =
+                        com.evansgisgen.geoworld.worldgen.GeoChunkGenerator
+                                .roadBlock(r.roadClass);
+                boolean deckAtWaterline =
+                        Math.abs(r.topY - (r.target + r.waterDepth + 1)) <= 1;
+                pass &= check(String.format("road_deck_%d_%d", r.x, r.z),
+                        r.top == roadBlock && deckAtWaterline
+                                && r.waterInTop24 > 0);
             }
         }
         // Phase 6: compiled road columns render the class's surface block
@@ -201,12 +230,19 @@ public final class TerrainSurveyScenario {
         for (ColumnReport r : reports) {
             if (r.surfaceClass > 0 && r.weight >= 0.98 && delegate != null
                     && r.waterDepth == 0 && r.roadClass == 0
-                    && r.buildingClass == 0) {
+                    && r.buildingClass == 0 && !r.landmark) {
                 BlockState expectedBlock =
                         com.evansgisgen.geoworld.worldgen.GeoChunkGenerator
                                 .surfaceBlock(r.surfaceClass);
+                // A planted tree's trunk column legitimately converts the
+                // surface block under it to dirt — accept that on the exact
+                // column the trunk stands on.
+                boolean trunkBase = r.terrainBlock.is(Blocks.DIRT)
+                        && level.getBlockState(new BlockPos(r.x, r.terrainY + 1, r.z))
+                                .is(net.minecraft.tags.BlockTags.LOGS);
                 pass &= check(String.format("surface_class_%d_%d", r.x, r.z),
-                        expectedBlock != null && r.terrainBlock == expectedBlock);
+                        expectedBlock != null
+                                && (r.terrainBlock == expectedBlock || trunkBase));
             }
         }
         // Phase 7: full-coverage columns live in the fixed plains biome —
@@ -221,13 +257,31 @@ public final class TerrainSurveyScenario {
         // storey above terrain and is a palette block (roof/wall/window).
         for (ColumnReport r : reports) {
             if (r.buildingClass > 0 && r.weight >= 0.98 && delegate != null
-                    && r.waterDepth == 0 && r.roadClass == 0) {
+                    && r.waterDepth == 0 && r.roadClass == 0 && !r.landmark) {
                 var palette = com.evansgisgen.geoworld.worldgen.GeoChunkGenerator
                         .buildingPalette(r.buildingClass);
                 pass &= check(String.format("building_shell_%d_%d", r.x, r.z),
                         palette != null && r.topY >= r.target + 4
                                 && (r.top == palette.roof() || r.top == palette.wall()
                                         || r.top == palette.window()));
+            }
+        }
+        // Phase 9: the demo landmark placed at (200, 60) — anchor [5,0,0]
+        // puts the north-face doorway at world (200, ground+1..2, 60) and
+        // brick walls either side of it. LEVEL_FOUNDATION flattened the lot.
+        {
+            GeoTile t = dataset.tileAt(200, 60).orElse(null);
+            if (t != null && t.hasElevation()) {
+                int g = t.elevation(dataset.localCoord(200), dataset.localCoord(60));
+                level.getChunk(200 >> 4, 64 >> 4);
+                BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+                boolean wall = level.getBlockState(pos.set(197, g + 2, 60))
+                        .is(Blocks.BRICKS);
+                boolean door = level.getBlockState(pos.set(200, g + 2, 60)).isAir()
+                        && level.getBlockState(pos.set(200, g + 3, 60)).isAir();
+                boolean roof = level.getBlockState(pos.set(200, g + 5, 64))
+                        .is(Blocks.DARK_OAK_PLANKS);
+                pass &= check("landmark_demo_house", wall && door && roof);
             }
         }
         LOGGER.info("GEOWORLD-RESULT {}", pass ? "PASS" : "FAIL");
@@ -240,7 +294,9 @@ public final class TerrainSurveyScenario {
 
     private ColumnReport survey(ServerLevel level, GeoDataset dataset,
             @Nullable net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator delegate,
-            net.minecraft.world.level.levelgen.RandomState randomState, int x, int z) {
+            net.minecraft.world.level.levelgen.RandomState randomState,
+            com.evansgisgen.geoworld.landmark.LandmarkIndex landmarkIndex,
+            int x, int z) {
         // Force the 3x3 chunk neighborhood to FULL before measuring: feature
         // writes from a neighbor's decoration (e.g. tree leaf overhang) land
         // asynchronously, so sampling without this races chunk population.
@@ -336,6 +392,6 @@ public final class TerrainSurveyScenario {
         return new ColumnReport(x, z, topY, groundY, oceanY, terrainY, terrainBlock,
                 top, waterInTop24, target, weight, waterDepth, roadClass,
                 surfaceClass, buildingClass, buildingLevels, biome,
-                vanilla, expected, topBlocks);
+                landmarkIndex.contains(x, z), vanilla, expected, topBlocks);
     }
 }

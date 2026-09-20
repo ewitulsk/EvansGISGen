@@ -13,7 +13,7 @@ dataset). See [PLAN.md](PLAN.md) for the full implementation plan.
 └── format/     # dataset format spec
 ```
 
-## Current status: Phase 8
+## Current status: Phase 10
 
 - `GeoChunkGenerator` wraps a vanilla `ChunkGenerator` (`geoworld:geoworld`)
   and delegates everything to it, then deforms terrain from geographic data:
@@ -52,8 +52,10 @@ dataset). See [PLAN.md](PLAN.md) for the full implementation plan.
   intersections resolve deterministically. The runtime paves the top blocks
   of road columns before vanilla decoration (so vegetation can't plant on
   pavement) and strips decoration output — snow cover, intruding tree
-  trunks/canopies — back off the surface afterwards. Water cells stay
-  unpaved until bridges exist.
+  trunks/canopies — back off the surface afterwards. Where a road crosses
+  water, the cell becomes a deck: a road slab one block above the waterline
+  (bed + depth + 1 ≈ road grade) with the channel kept underneath, mirrored
+  in `getBaseColumn`/height queries.
 - Land use (Phase 7): `fetch-landuse` pulls OSM `landuse`/`leisure`/
   `natural`/`railway`/`aeroway` polygons; `landuse.py` rasterizes them into
   a per-cell surface class (`0x04` layer: residential, farmland, forest,
@@ -77,16 +79,42 @@ dataset). See [PLAN.md](PLAN.md) for the full implementation plan.
   `height`/3, or a per-class default). The runtime extrudes deterministic
   shells — floor at terrain, walls to `terrain + levels*4`, a window band
   on the second level, flat roof — respecting roads and water, and clearing
-  vegetation/canopy overhang above roofs. Landmark hook: a claimed
-  building ID will suppress its shell (Phase 9).
+  vegetation/canopy overhang above roofs.
+- Landmarks (Phase 9): `landmarks.json` in the dataset declares curated
+  structures (id, `landmarks/*.nbt` template, geo position, template-space
+  anchor, rotation, terrain policy, optional `replaces_building`).
+  `LandmarkIndex` loads each `.nbt` via vanilla `StructureTemplate`,
+  computes the transformed world bounding box, and indexes it into every
+  intersecting chunk; `placeChunk` renders each chunk's slice with a
+  clamped `StructurePlaceSettings` bounding box (the same slicing vanilla
+  uses), so multi-chunk landmarks assemble deterministically. Terrain
+  policies: `NONE`, `LEVEL_FOUNDATION` (fill dips + cut above the ground
+  plane), `CUT_AND_FILL` (fill + trim terrain towering over the roof),
+  `FOLLOW_TERRAIN` (extend columns to ground). The landmark's box also
+  suppresses procedural building shells underneath it. A demo house sits
+  at geo (200, -60) = block (200, 60), east of downtown.
+- Corridor (Phase 10): dataset bounds are now a rect
+  (`--bounds eMin,nMin,eMax,nMax`) instead of a square, and `--corridor`
+  composes `max(BoxRamp, corridor_field(US-77))`: trunk/motorway ways
+  from the roads JSON become centerline polylines, rasterized into an
+  8 m weight grid via distance transform (`RasterField`) — full
+  geographic control within `--corridor-full` meters of the road,
+  smootherstep to vanilla over `--corridor-ramp`. Corridor polylines are
+  clipped one reach inside the dataset bounds so the ramp fully decays
+  before coverage ends — no seam where the real highway continues past
+  the data. The compiled dataset now runs from just south of Beatrice
+  (z ≈ +7,900) ~26 km north along US-77 through Pickrell to z ≈ -25,800,
+  with DEM/roads/water/land-use/buildings along it.
 - `geoworld_compiler` (Python) writes the format: `manifest.json` + 256x256
   tiles with zlib-compressed sections (elevation int16, influence u8,
   surface/road u8, water bitset, water depth u8, building u8 + levels u8). `dem.py` mosaics + reprojects real elevation
   rasters (rasterio/pyproj) onto the geo meter grid; `fetch.py` downloads
   USGS 3DEP 1 m DEM tiles from The National Map.
-- `datasets/beatrice.geoworld` is real USGS 1 m LiDAR terrain for downtown
-  Beatrice, NE (~8 km square, 1024 tiles, 372-428 m real elevation). Spawn is
-  downtown Beatrice; the Big Blue River valley is visible east of the origin.
+- `datasets/beatrice.geoworld` is real USGS 1 m LiDAR terrain for
+  Beatrice, NE plus the US-77 corridor: the 8 km square around downtown
+  plus a ~4 km-wide strip running ~26 km north past Pickrell
+  (372-428 m real elevation). Spawn is downtown Beatrice; the Big Blue
+  River valley is visible east of the origin.
   `datasets/synthetic.geoworld` remains as the no-GIS pipeline test.
 
 ### Beatrice landmarks (block coords)
@@ -102,6 +130,9 @@ Block `(x, z)` maps to geo `(east_m, -north_m)` relative to the anchor at
 | Orange Blvd south end (high school)| 3055  | 610   |
 | Big Blue River channel             | 1243  | 1782  |
 | Dusenbery-Doyle Reservoir          | -600  | 1985  |
+| Demo landmark house                | 200   | 60    |
+| US-77 road deck over stream        | 57    | 1279  |
+| US-77 corridor, north end          | ~2900 | -25800|
 - Debug commands: `/geoworld info`, `/geoworld geo`,
   `/geoworld geo <east> <north>`.
 

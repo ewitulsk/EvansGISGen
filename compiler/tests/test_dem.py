@@ -78,3 +78,16 @@ def test_influence_ramp(source):
     assert source.influence(256.0, 0.0) == 0.0        # at/ beyond edge
     mid = source.influence(200.0, 0.0)                # inside ramp zone
     assert 0.0 < mid < 1.0
+
+
+def test_rect_bounds(dem_tif):
+    # Rectangular bounds sample an asymmetric region - corridor support.
+    src = DemSource(
+        [dem_tif], geo_crs=CRS, anchor_east=ANCHOR_E, anchor_north=ANCHOR_N,
+        bounds_m=(-100.0, -50.0, 100.0, 400.0), ramp_m=64,
+    )
+    assert src.elevation_m(0.0, 0.0) is not None
+    assert src.elevation_m(0.0, 300.0) is not None   # tall north extent
+    # bounds() unions the influence field's reach: the default BoxRamp
+    # takes the max absolute bound (400) as its square half-extent.
+    assert src.bounds() == (-400.0, -400.0, 400.0, 400.0)

@@ -3,7 +3,7 @@
 Source protocol (geo space = meters east/north of the anchor):
     elevation_m(east, north) -> float | None   (None = no data)
     influence(east, north)   -> float 0..1
-    extent_m()               -> float   (half-extent of tile coverage square)
+    bounds()                 -> (min_e, min_n, max_e, max_n) tile coverage rect
 
 SyntheticSource exists to prove the pipeline end-to-end; DemSource (dem.py)
 is the real Phase 3 terrain source.
@@ -44,5 +44,6 @@ class SyntheticSource:
         """0..1 geographic influence: full inside radius_full, ramp to edge."""
         return self._field.weight(east, north)
 
-    def extent_m(self) -> float:
-        return self.radius_edge_m
+    def bounds(self) -> tuple[float, float, float, float]:
+        e = self.radius_edge_m
+        return (-e, -e, e, e)

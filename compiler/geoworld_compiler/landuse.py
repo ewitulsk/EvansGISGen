@@ -112,20 +112,23 @@ def _classify(tags: dict) -> tuple[int, int] | None:
 class LanduseSource:
     """Per-cell surface class rasterized from OSM land-use polygons/lines.
 
-    Grid lives in dataset geo space over [-extent_m, +extent_m]^2 at
-    `resolution_m` per cell, mirroring HydroSource/RoadSource.
+    Grid lives in dataset geo space over the rect `bounds` =
+    (min_e, min_n, max_e, max_n) at `resolution_m` per cell, mirroring
+    HydroSource/RoadSource.
     """
 
     def __init__(self, osm_json_path: str | Path, projection: Projection,
-                 extent_m: float, resolution_m: float = 1.0):
+                 bounds: tuple[float, float, float, float],
+                 resolution_m: float = 1.0):
         data = json.loads(Path(osm_json_path).read_text())
 
-        self.extent_m = extent_m
+        self.bounds = bounds
         self.resolution_m = resolution_m
-        size = math.ceil(2.0 * extent_m / resolution_m)
-        self._transform = Affine(resolution_m, 0.0, -extent_m,
-                                 0.0, -resolution_m, extent_m)
-        self._size = size
+        e0, n0, e1, n1 = bounds
+        self._shape = (math.ceil((n1 - n0) / resolution_m),
+                       math.ceil((e1 - e0) / resolution_m))
+        self._transform = Affine(resolution_m, 0.0, e0,
+                                 0.0, -resolution_m, n1)
 
         # Group by (class, priority): one rasterize per distinct class.
         polys: dict[tuple[int, int], list[dict]] = {}
@@ -151,17 +154,17 @@ class LanduseSource:
             polys.setdefault(hit, []).append(
                 {"type": "Polygon", "coordinates": [coords]})
 
-        surface = np.zeros((size, size), dtype=np.uint8)
+        surface = np.zeros(self._shape, dtype=np.uint8)
         for (cls, _prio), geoms in sorted(polys.items(), key=lambda kv: kv[0][1]):
             mask = rasterize([(g, 1) for g in geoms],
-                             out_shape=(size, size), transform=self._transform,
+                             out_shape=self._shape, transform=self._transform,
                              fill=0, all_touched=True, dtype=np.uint8)
             surface[mask.astype(bool)] = cls
 
         # Rail corridors: distance-to-track <= ballast half-width.
         if rail_lines:
             center = rasterize([(g, 1) for g in rail_lines],
-                               out_shape=(size, size), transform=self._transform,
+                               out_shape=self._shape, transform=self._transform,
                                fill=0, all_touched=True, dtype=np.uint8).astype(bool)
             if center.any():
                 dc = distance_transform_edt(~center, sampling=resolution_m)
@@ -171,8 +174,8 @@ class LanduseSource:
 
     def surface_class(self, east: float, north: float) -> int:
         """Surface class at geo coords; SURFACE_NATURAL = unclassified."""
-        col = math.floor((east + self.extent_m) / self.resolution_m)
-        row = math.floor((self.extent_m - north) / self.resolution_m)
-        if row < 0 or col < 0 or row >= self._size or col >= self._size:
+        col = math.floor((east - self.bounds[0]) / self.resolution_m)
+        row = math.floor((self.bounds[3] - north) / self.resolution_m)
+        if row < 0 or col < 0 or row >= self._shape[0] or col >= self._shape[1]:
             return SURFACE_NATURAL
         return int(self._surface[row, col])

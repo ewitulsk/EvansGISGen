@@ -60,7 +60,7 @@ def test_cross_section(tmp_path, projection):
     path = _write(tmp_path, [
         _way(1, {"highway": "residential"}, [(-60.0, 0.0), (60.0, 0.0)]),
     ])
-    src = RoadSource(path, projection, extent_m=90.0)
+    src = RoadSource(path, projection, bounds=(-90.0, -90.0, 90.0, 90.0))
     # Residential: half=3.5, curb=0.5, walk=1.5; unmarked (lanes=1).
     assert src.road_class(0.0, 0.0) == ROAD_ASPHALT
     assert src.road_class(0.0, 2.0) == ROAD_ASPHALT
@@ -75,7 +75,7 @@ def test_unpaved_track(tmp_path, projection):
     path = _write(tmp_path, [
         _way(1, {"highway": "track"}, [(-40.0, 0.0), (40.0, 0.0)]),
     ])
-    src = RoadSource(path, projection, extent_m=80.0)
+    src = RoadSource(path, projection, bounds=(-80.0, -80.0, 80.0, 80.0))
     assert src.road_class(0.0, 0.0) == ROAD_TRACK
     assert src.road_class(0.0, 4.0) == ROAD_NONE
 
@@ -86,7 +86,7 @@ def test_priority_at_intersection(tmp_path, projection):
         _way(1, {"highway": "residential"}, [(-60.0, 0.0), (60.0, 0.0)]),
         _way(2, {"highway": "secondary"}, [(0.0, -60.0), (0.0, 60.0)]),
     ])
-    src = RoadSource(path, projection, extent_m=90.0)
+    src = RoadSource(path, projection, bounds=(-90.0, -90.0, 90.0, 90.0))
     # At the crossing the secondary road's surface wins (prio 70 > 40).
     assert src.road_class(0.0, 0.0) == ROAD_MARKING
     # Residential sidewalk inside the avenue's asphalt is overwritten —
@@ -96,3 +96,22 @@ def test_priority_at_intersection(tmp_path, projection):
     assert src.road_class(30.0, 5.0) == ROAD_SIDEWALK
     # And the avenue's own sidewalk band takes over beyond its curb.
     assert src.road_class(6.0, 4.0) == ROAD_SIDEWALK
+
+
+def test_corridor_polylines(tmp_path, projection):
+    # Only trunk/motorway ways become corridor primitives; primary and
+    # residential roads rasterize but don't claim corridor influence.
+    from geoworld_compiler.roads import corridor_polylines
+    path = _write(tmp_path, [
+        _way(1, {"highway": "trunk", "ref": "US 77"},
+             [(0.0, -50.0), (0.0, 50.0)]),
+        _way(2, {"highway": "primary", "ref": "US 136"},
+             [(-50.0, 0.0), (50.0, 0.0)]),
+        _way(3, {"highway": "residential"}, [(-30.0, 30.0), (30.0, 30.0)]),
+    ])
+    lines = corridor_polylines(path, projection)
+    assert len(lines) == 1
+    (e0, n0), (e1, n1) = lines[0]
+    assert e0 == pytest.approx(0.0, abs=0.5)
+    assert n0 == pytest.approx(-50.0, abs=0.5)
+    assert n1 == pytest.approx(50.0, abs=0.5)

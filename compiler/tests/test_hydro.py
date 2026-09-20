@@ -59,7 +59,7 @@ def test_river_depth_profile(tmp_path, projection):
     path = _write_osm(tmp_path, [
         _way(1, {"waterway": "river"}, [(-150.0, 0.0), (150.0, 0.0)]),
     ])
-    hydro = HydroSource(path, projection, extent_m=180.0, bank_m=6.0)
+    hydro = HydroSource(path, projection, bounds=(-180.0, -180.0, 180.0, 180.0), bank_m=6.0)
     # Centerline: full river depth (half-width 15 > bank 6).
     assert hydro.depth_m(0.0, 0.0) == pytest.approx(4.0, abs=0.05)
     # Flat bed in the middle, then a monotonic falloff to the banks
@@ -83,7 +83,7 @@ def test_pond_polygon_depth(tmp_path, projection):
     path = _write_osm(tmp_path, [
         _way(1, {"natural": "water", "water": "pond"}, ring),
     ])
-    hydro = HydroSource(path, projection, extent_m=200.0, bank_m=6.0)
+    hydro = HydroSource(path, projection, bounds=(-200.0, -200.0, 200.0, 200.0), bank_m=6.0)
     # Center: 20 m from the edge > bank_m -> full pond depth.
     assert hydro.depth_m(100.0, 100.0) == pytest.approx(2.5, abs=0.1)
     # Just inside the edge: shallower than center.
@@ -97,7 +97,7 @@ def test_class_widths(tmp_path, projection):
     path = _write_osm(tmp_path, [
         _way(1, {"waterway": "ditch"}, [(-100.0, 50.0), (100.0, 50.0)]),
     ])
-    hydro = HydroSource(path, projection, extent_m=180.0, bank_m=6.0)
+    hydro = HydroSource(path, projection, bounds=(-180.0, -180.0, 180.0, 180.0), bank_m=6.0)
     # Bank capped at half-width: even a 2 m ditch reaches full depth.
     assert hydro.depth_m(0.0, 50.0) == pytest.approx(0.8, abs=0.15)
     # Wet only within a couple meters of the centerline.

@@ -98,6 +98,48 @@ out geom;"""
     return out
 
 
+def corridor_polylines(osm_json_path: str | Path, projection: Projection,
+                       highway_values: frozenset[str] = frozenset(
+                           {"motorway", "trunk"})):
+    """Centerline polylines of major roads from a fetch-roads payload —
+    the US-77 corridor primitive for Phase 10 influence fields. Returns a
+    list of (east, north) point sequences, one per way."""
+    data = json.loads(Path(osm_json_path).read_text())
+    lines = []
+    for el in data.get("elements", []):
+        if el.get("type") != "way":
+            continue
+        tags = el.get("tags", {})
+        if tags.get("highway") not in highway_values:
+            continue
+        geom = el.get("geometry")
+        if not geom or len(geom) < 2:
+            continue
+        lines.append([projection.to_geo(p["lat"], p["lon"]) for p in geom])
+    return lines
+
+
+def clip_polylines(lines, bounds: tuple[float, float, float, float]):
+    """Split polylines at a rect, keeping contiguous runs of >=2 in-bounds
+    points. Clipping a corridor `reach` inside the dataset bounds lets the
+    influence ramp fully decay before the data ends — otherwise the field
+    would cut off mid-strip and seam."""
+    e0, n0, e1, n1 = bounds
+    out = []
+    for line in lines:
+        run = []
+        for e, n in line:
+            if e0 <= e <= e1 and n0 <= n <= n1:
+                run.append((e, n))
+                continue
+            if len(run) >= 2:
+                out.append(run)
+            run = []
+        if len(run) >= 2:
+            out.append(run)
+    return out
+
+
 def parse_osm_roads(data: dict, projection: Projection):
     """Split Overpass JSON into (defaulted, overridden) road features.
 
@@ -137,21 +179,24 @@ def parse_osm_roads(data: dict, projection: Projection):
 class RoadSource:
     """Per-cell road surface class rasterized from OSM highway vectors.
 
-    Grid lives in dataset geo space over [-extent_m, +extent_m]^2 at
-    `resolution_m` per cell, mirroring HydroSource.
+    Grid lives in dataset geo space over the rect `bounds` =
+    (min_e, min_n, max_e, max_n) at `resolution_m` per cell, mirroring
+    HydroSource.
     """
 
     def __init__(self, osm_json_path: str | Path, projection: Projection,
-                 extent_m: float, resolution_m: float = 1.0):
+                 bounds: tuple[float, float, float, float],
+                 resolution_m: float = 1.0):
         data = json.loads(Path(osm_json_path).read_text())
         roads = parse_osm_roads(data, projection)
 
-        self.extent_m = extent_m
+        self.bounds = bounds
         self.resolution_m = resolution_m
-        size = math.ceil(2.0 * extent_m / resolution_m)
-        self._transform = Affine(resolution_m, 0.0, -extent_m,
-                                 0.0, -resolution_m, extent_m)
-        self._size = size
+        e0, n0, e1, n1 = bounds
+        self._shape = (math.ceil((n1 - n0) / resolution_m),
+                       math.ceil((e1 - e0) / resolution_m))
+        self._transform = Affine(resolution_m, 0.0, e0,
+                                 0.0, -resolution_m, n1)
 
         # Batch features that share identical params so each distinct
         # cross-section costs one EDT on the full grid.
@@ -159,7 +204,7 @@ class RoadSource:
         for params, coords in roads:
             groups.setdefault(params, []).append(self._linestring(coords))
 
-        road = np.zeros((size, size), dtype=np.uint8)
+        road = np.zeros(self._shape, dtype=np.uint8)
         for params in sorted(groups, key=lambda p: p.prio):
             zone = self._classify(groups[params], params)
             if zone is not None:
@@ -171,13 +216,13 @@ class RoadSource:
         return {"type": "LineString", "coordinates": coords}
 
     def _classify(self, geoms: list[dict], p: RoadParams) -> np.ndarray | None:
-        center = rasterize([(g, 1) for g in geoms], out_shape=(self._size, self._size),
+        center = rasterize([(g, 1) for g in geoms], out_shape=self._shape,
                            transform=self._transform, fill=0,
                            all_touched=True, dtype=np.uint8).astype(bool)
         if not center.any():
             return None
         dc = distance_transform_edt(~center, sampling=self.resolution_m)
-        zone = np.zeros((self._size, self._size), dtype=np.uint8)
+        zone = np.zeros(self._shape, dtype=np.uint8)
         outer = p.half + p.curb + p.walk + p.shoulder
         band = dc <= outer
         if p.shoulder > 0:
@@ -194,8 +239,8 @@ class RoadSource:
 
     def road_class(self, east: float, north: float) -> int:
         """Road surface class at geo coords; ROAD_NONE = no road."""
-        col = math.floor((east + self.extent_m) / self.resolution_m)
-        row = math.floor((self.extent_m - north) / self.resolution_m)
-        if row < 0 or col < 0 or row >= self._size or col >= self._size:
+        col = math.floor((east - self.bounds[0]) / self.resolution_m)
+        row = math.floor((self.bounds[3] - north) / self.resolution_m)
+        if row < 0 or col < 0 or row >= self._shape[0] or col >= self._shape[1]:
             return ROAD_NONE
         return int(self._road[row, col])

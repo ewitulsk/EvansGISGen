@@ -59,6 +59,17 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--ms-buildings", default=None,
                    help="Microsoft GlobalML footprint JSON from "
                         "fetch-buildings-ms; merged under OSM as GENERIC")
+    b.add_argument("--bounds", default=None,
+                   help="'eMin,nMin,eMax,nMax' dataset rect in geo meters "
+                        "(default: +-radius square)")
+    b.add_argument("--corridor", action="store_true",
+                   help="add a CorridorRamp influence strip along the major "
+                        "highways (motorway/trunk) in --roads — "
+                        "the US-77 corridor (Phase 10)")
+    b.add_argument("--corridor-full", type=float, default=500.0,
+                   help="corridor: full-influence half-width (m)")
+    b.add_argument("--corridor-ramp", type=float, default=1500.0,
+                   help="corridor: blend-to-vanilla width beyond full (m)")
 
     fe = sub.add_parser("fetch", help="download DEM rasters from the USGS TNM API")
     fe.add_argument("--bbox", required=True,
@@ -174,6 +185,12 @@ def main(argv: list[str] | None = None) -> int:
             datum_y=args.datum_y,
         )
 
+        # Dataset rect in geo meters; default keeps the legacy square.
+        if args.bounds:
+            bounds = tuple(float(s) for s in args.bounds.split(","))
+        else:
+            bounds = (-args.radius, -args.radius, args.radius, args.radius)
+
         if args.source == "dem":
             if not args.dem:
                 parser.error("--source dem requires --dem <raster> [<raster> ...]")
@@ -181,13 +198,35 @@ def main(argv: list[str] | None = None) -> int:
                 parser.error("--source dem requires --anchor lat,lon")
             from .dem import DemSource
 
+            field = None
+            if args.corridor:
+                if not args.roads:
+                    parser.error("--corridor requires --roads")
+                from .influence import (BoxRamp, corridor_field, combine_max)
+                from .roads import clip_polylines, corridor_polylines
+
+                # Clip the corridor one reach inside the dataset rect so the
+                # ramp fully decays before coverage ends — a polyline cut at
+                # the boundary would leave w=1 right at the dataset edge.
+                reach = args.corridor_full + args.corridor_ramp
+                clip = (bounds[0] + reach, bounds[1] + reach,
+                        bounds[2] - reach, bounds[3] - reach)
+                lines = clip_polylines(
+                    corridor_polylines(args.roads, projection), clip)
+                field = combine_max(
+                    BoxRamp(args.radius, args.ramp),
+                    corridor_field(lines, bounds,
+                                   args.corridor_full, args.corridor_ramp))
+                print(f"corridor: {len(lines)} major-road ways")
+
             source = DemSource(
                 args.dem,
                 geo_crs=args.crs,
                 anchor_east=anchor_east,
                 anchor_north=anchor_north,
-                half_extent_m=args.radius,
+                bounds_m=bounds,
                 ramp_m=args.ramp,
+                influence=field,
             )
         else:
             from .sources import SyntheticSource
@@ -204,23 +243,23 @@ def main(argv: list[str] | None = None) -> int:
                 parser.error("--hydro/--roads/--landuse/--buildings/"
                              "--ms-buildings require --anchor lat,lon")
             from .tileio import TILE_SIZE
+            # Layer grids pad one tile past the dataset rect so edge cells
+            # of boundary tiles still have real classifications to read.
+            sb = (bounds[0] - TILE_SIZE, bounds[1] - TILE_SIZE,
+                  bounds[2] + TILE_SIZE, bounds[3] + TILE_SIZE)
             if args.hydro:
                 from .hydro import HydroSource
-                hydro = HydroSource(args.hydro, projection,
-                                    extent_m=args.radius + TILE_SIZE)
+                hydro = HydroSource(args.hydro, projection, bounds=sb)
             if args.roads:
                 from .roads import RoadSource
-                roads = RoadSource(args.roads, projection,
-                                   extent_m=args.radius + TILE_SIZE)
+                roads = RoadSource(args.roads, projection, bounds=sb)
             if args.landuse:
                 from .landuse import LanduseSource
-                landuse = LanduseSource(args.landuse, projection,
-                                        extent_m=args.radius + TILE_SIZE)
+                landuse = LanduseSource(args.landuse, projection, bounds=sb)
             if args.buildings or args.ms_buildings:
                 from .buildings import BuildingSource
                 buildings = BuildingSource(
-                    args.buildings, projection,
-                    extent_m=args.radius + TILE_SIZE,
+                    args.buildings, projection, bounds=sb,
                     ms_json_path=args.ms_buildings)
 
         out = build_dataset(args.out, name=args.name, transform=transform,

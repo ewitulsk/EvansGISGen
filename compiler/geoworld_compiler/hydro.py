@@ -107,24 +107,28 @@ class HydroSource:
     """Per-cell channel depth (meters) rasterized from OSM water vectors.
 
     Grids live in dataset geo space (meters east/north of the anchor) over
-    the square [-extent_m, +extent_m]^2 at `resolution_m` per cell.
+    the rect `bounds` = (min_e, min_n, max_e, max_n) at `resolution_m` per
+    cell — rectangular so corridors don't pay for a square.
     """
 
     def __init__(self, osm_json_path: str | Path, projection: Projection,
-                 extent_m: float, resolution_m: float = 1.0, bank_m: float = 6.0):
+                 bounds: tuple[float, float, float, float],
+                 resolution_m: float = 1.0, bank_m: float = 6.0):
         data = json.loads(Path(osm_json_path).read_text())
         lines, areas = parse_osm_water(data, projection)
 
-        self.extent_m = extent_m
+        self.bounds = bounds
         self.resolution_m = resolution_m
         self.bank_m = bank_m
-        size = math.ceil(2.0 * extent_m / resolution_m)
-        # Geo meters -> pixels: col = (e + ext)/res, row = (ext - n)/res.
-        self._transform = Affine(resolution_m, 0.0, -extent_m,
-                                 0.0, -resolution_m, extent_m)
-        self._size = size
+        e0, n0, e1, n1 = bounds
+        width = math.ceil((e1 - e0) / resolution_m)
+        height = math.ceil((n1 - n0) / resolution_m)
+        # Geo meters -> pixels: col = (e - e0)/res, row = (n1 - n)/res.
+        self._transform = Affine(resolution_m, 0.0, e0,
+                                 0.0, -resolution_m, n1)
+        self._shape = (height, width)
 
-        depth = np.zeros((size, size), dtype=np.float32)
+        depth = np.zeros(self._shape, dtype=np.float32)
 
         # Line features: one EDT per waterway class (half-width is
         # class-uniform), depth ramps from centerline to bank.
@@ -132,7 +136,7 @@ class HydroSource:
             geoms = [self._linestring(c) for k, c in lines if k == cls]
             if not geoms:
                 continue
-            center = rasterize([(g, 1) for g in geoms], out_shape=(size, size),
+            center = rasterize([(g, 1) for g in geoms], out_shape=self._shape,
                                transform=self._transform, fill=0,
                                all_touched=True, dtype=np.uint8).astype(bool)
             if not center.any():
@@ -153,7 +157,7 @@ class HydroSource:
             shapes = [(self._polygon(ring), AREA_DEPTHS.get(tag, AREA_DEPTHS[None]))
                       for tag, ring in sorted(
                           areas, key=lambda a: AREA_DEPTHS.get(a[0], AREA_DEPTHS[None]))]
-            area_max = rasterize(shapes, out_shape=(size, size),
+            area_max = rasterize(shapes, out_shape=self._shape,
                                  transform=self._transform, fill=0.0,
                                  dtype=np.float32)
             mask = area_max > 0.0
@@ -175,9 +179,9 @@ class HydroSource:
 
     def depth_m(self, east: float, north: float) -> float:
         """Channel depth in meters at geo coords; 0 = dry column."""
-        col = math.floor((east + self.extent_m) / self.resolution_m)
-        row = math.floor((self.extent_m - north) / self.resolution_m)
-        if row < 0 or col < 0 or row >= self._size or col >= self._size:
+        col = math.floor((east - self.bounds[0]) / self.resolution_m)
+        row = math.floor((self.bounds[3] - north) / self.resolution_m)
+        if row < 0 or col < 0 or row >= self._shape[0] or col >= self._shape[1]:
             return 0.0
         return float(self._depth[row, col])
 

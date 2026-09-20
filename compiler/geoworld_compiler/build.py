@@ -17,7 +17,7 @@ class Source(Protocol):
 
     def elevation_m(self, east: float, north: float) -> float | None: ...
     def influence(self, east: float, north: float) -> float: ...
-    def extent_m(self) -> float: ...
+    def bounds(self) -> tuple[float, float, float, float]: ...
 
 
 class Hydro(Protocol):
@@ -62,12 +62,16 @@ def build_dataset(
     tiles_dir = out / "tiles"
     tiles_dir.mkdir(parents=True, exist_ok=True)
 
-    # Tile coverage: square bounding box of the source extent, in tiles.
-    edge_blocks = math.ceil(source.extent_m() / transform.horizontal_meters_per_block)
-    t_min_x = math.floor((transform.origin_x - edge_blocks) / TILE_SIZE)
-    t_max_x = math.floor((transform.origin_x + edge_blocks) / TILE_SIZE)
-    t_min_z = math.floor((transform.origin_z - edge_blocks) / TILE_SIZE)
-    t_max_z = math.floor((transform.origin_z + edge_blocks) / TILE_SIZE)
+    # Tile coverage: the source's geo-space bounds rect, in tiles.
+    e0, n0, e1, n1 = source.bounds()
+    bx0 = transform.block_x(e0)
+    bx1 = transform.block_x(e1)
+    bz0 = transform.block_z(n1)  # +north maps to -z
+    bz1 = transform.block_z(n0)
+    t_min_x = math.floor(bx0 / TILE_SIZE)
+    t_max_x = math.floor(bx1 / TILE_SIZE)
+    t_min_z = math.floor(bz0 / TILE_SIZE)
+    t_max_z = math.floor(bz1 / TILE_SIZE)
 
     written: list[tuple[int, int]] = []
     any_water = False
@@ -77,7 +81,7 @@ def build_dataset(
     n = TILE_SIZE * TILE_SIZE
     for tx in range(t_min_x, t_max_x + 1):
         for tz in range(t_min_z, t_max_z + 1):
-            elevation = [0] * n
+            elevation = [NODATA] * n
             influence = bytearray(n)
             surface = bytearray(n)
             water_depth = bytearray(n)
@@ -96,27 +100,27 @@ def build_dataset(
                     bx = tx * TILE_SIZE + lx
                     east = transform.east_meters(bx)
                     w = source.influence(east, north)
-                    i = lz * TILE_SIZE + lx
+                    if w <= 0.0:
+                        continue  # vanilla column — no layers to paint
                     elev = source.elevation_m(east, north)
                     if elev is None:
                         # No-data columns are pure vanilla regardless of influence.
-                        elevation[i] = NODATA
-                        w = 0.0
-                    else:
-                        elevation[i] = transform.block_y(elev)
-                        if hydro is not None:
-                            depth_m = hydro.depth_m(east, north)
-                            if depth_m > 0.0:
-                                # Bake the riverbed into elevation: LiDAR
-                                # water surface - channel depth = bed. The
-                                # runtime fills water bed+1 .. bed+depth.
-                                surface_y = transform.block_y(elev)
-                                bed_y = transform.block_y(elev - depth_m)
-                                depth_blocks = surface_y - bed_y
-                                if depth_blocks > 0:
-                                    elevation[i] = bed_y
-                                    water_depth[i] = min(255, depth_blocks)
-                                    any_tile_water = True
+                        continue
+                    i = lz * TILE_SIZE + lx
+                    elevation[i] = transform.block_y(elev)
+                    if hydro is not None:
+                        depth_m = hydro.depth_m(east, north)
+                        if depth_m > 0.0:
+                            # Bake the riverbed into elevation: LiDAR
+                            # water surface - channel depth = bed. The
+                            # runtime fills water bed+1 .. bed+depth.
+                            surface_y = transform.block_y(elev)
+                            bed_y = transform.block_y(elev - depth_m)
+                            depth_blocks = surface_y - bed_y
+                            if depth_blocks > 0:
+                                elevation[i] = bed_y
+                                water_depth[i] = min(255, depth_blocks)
+                                any_tile_water = True
                     if roads is not None:
                         rc = roads.road_class(east, north)
                         if rc:
@@ -134,7 +138,7 @@ def build_dataset(
                             b_levels[i] = buildings.building_levels(east, north)
                             any_tile_building = True
                     influence[i] = min(255, max(0, int(w * 255.0 + 0.5)))
-                    any_influence = any_influence or w > 0.0
+                    any_influence = True
             if any_influence:
                 layers = {"elevation": pack_elevation(elevation),
                           "influence": bytes(influence)}
