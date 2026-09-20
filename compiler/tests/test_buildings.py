@@ -85,3 +85,51 @@ def test_open_ring_is_closed(tmp_path, projection):
     ])
     src = BuildingSource(path, projection, extent_m=200.0)
     assert src.building_class(10.0, 10.0) == BUILDING_RESIDENTIAL
+
+
+def _ms(tmp_path, features):
+    """features: list of (coords (east,north) meters, height)."""
+    import pyproj
+    proj = Projection(CRS, *ANCHOR)
+    inv = pyproj.Transformer.from_crs(CRS, "EPSG:4326", always_xy=True)
+    feats = [{"coords": [list(inv.transform(e + proj.anchor_east,
+                                           n + proj.anchor_north))
+                         for e, n in coords],
+              "height": h}
+             for coords, h in features]
+    p = tmp_path / "ms_buildings.json"
+    p.write_text(json.dumps({"features": feats}))
+    return p
+
+
+def test_ms_footprints_generic(tmp_path, projection):
+    ms = _ms(tmp_path, [
+        (_poly(0.0, 0.0, 10.0), -1.0),          # no height -> default levels
+        (_poly(60.0, 0.0, 10.0), 9.0),          # 9 m -> 3 floors
+    ])
+    src = BuildingSource(None, projection, extent_m=200.0,
+                         ms_json_path=ms)
+    assert src.building_class(0.0, 0.0) == BUILDING_GENERIC
+    assert src.building_levels(0.0, 0.0) == 2
+    assert src.building_class(60.0, 0.0) == BUILDING_GENERIC
+    assert src.building_levels(60.0, 0.0) == 3
+    assert src.building_class(-60.0, 0.0) == BUILDING_NONE
+
+
+def test_osm_overrides_ms(tmp_path, projection):
+    # Both datasets cover the cell: OSM's real class + levels must win.
+    osm = _write(tmp_path, [
+        _way(1, {"building": "school", "building:levels": "4"},
+             _poly(0.0, 0.0, 10.0)),
+    ])
+    ms = _ms(tmp_path, [(_poly(0.0, 0.0, 12.0), -1.0)])
+    src = BuildingSource(osm, projection, extent_m=200.0, ms_json_path=ms)
+    assert src.building_class(0.0, 0.0) == BUILDING_CIVIC
+    assert src.building_levels(0.0, 0.0) == 4
+    # MS polygon sticks out past the OSM one: residue stays GENERIC.
+    assert src.building_class(11.0, 0.0) == BUILDING_GENERIC
+
+
+def test_requires_at_least_one_input(tmp_path, projection):
+    with pytest.raises(ValueError):
+        BuildingSource(None, projection, extent_m=200.0)

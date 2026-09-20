@@ -56,6 +56,9 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--buildings", default=None,
                    help="OSM building JSON from fetch-buildings; emits the "
                         "building class/levels layers")
+    b.add_argument("--ms-buildings", default=None,
+                   help="Microsoft GlobalML footprint JSON from "
+                        "fetch-buildings-ms; merged under OSM as GENERIC")
 
     fe = sub.add_parser("fetch", help="download DEM rasters from the USGS TNM API")
     fe.add_argument("--bbox", required=True,
@@ -86,6 +89,13 @@ def main(argv: list[str] | None = None) -> int:
     fb.add_argument("--bbox", required=True,
                     help="'minLon,minLat,maxLon,maxLat' in WGS84 degrees")
     fb.add_argument("--out", required=True, help="output JSON path")
+
+    fm = sub.add_parser("fetch-buildings-ms",
+                        help="download Microsoft GlobalML building footprints "
+                             "for the quadkey tiles covering the bbox")
+    fm.add_argument("--bbox", required=True,
+                    help="'minLon,minLat,maxLon,maxLat' in WGS84 degrees")
+    fm.add_argument("--out", required=True, help="output JSON path")
 
     f = sub.add_parser("fixture", help="write a known-pattern test tile")
     f.add_argument("--out", required=True, help="output .gwt path")
@@ -137,6 +147,14 @@ def main(argv: list[str] | None = None) -> int:
         print(fetch_buildings(min_lon, min_lat, max_lon, max_lat, args.out))
         return 0
 
+    if args.command == "fetch-buildings-ms":
+        from .buildings import fetch_buildings_ms
+
+        min_lon, min_lat, max_lon, max_lat = (
+            float(s) for s in args.bbox.split(","))
+        print(fetch_buildings_ms(min_lon, min_lat, max_lon, max_lat, args.out))
+        return 0
+
     if args.command == "build":
         from .build import build_dataset
         from .transform import GeoTransform, Projection
@@ -180,10 +198,11 @@ def main(argv: list[str] | None = None) -> int:
         roads = None
         landuse = None
         buildings = None
-        if args.hydro or args.roads or args.landuse or args.buildings:
+        if (args.hydro or args.roads or args.landuse or args.buildings
+                or args.ms_buildings):
             if projection is None:
-                parser.error("--hydro/--roads/--landuse/--buildings require "
-                             "--anchor lat,lon")
+                parser.error("--hydro/--roads/--landuse/--buildings/"
+                             "--ms-buildings require --anchor lat,lon")
             from .tileio import TILE_SIZE
             if args.hydro:
                 from .hydro import HydroSource
@@ -197,10 +216,12 @@ def main(argv: list[str] | None = None) -> int:
                 from .landuse import LanduseSource
                 landuse = LanduseSource(args.landuse, projection,
                                         extent_m=args.radius + TILE_SIZE)
-            if args.buildings:
+            if args.buildings or args.ms_buildings:
                 from .buildings import BuildingSource
-                buildings = BuildingSource(args.buildings, projection,
-                                           extent_m=args.radius + TILE_SIZE)
+                buildings = BuildingSource(
+                    args.buildings, projection,
+                    extent_m=args.radius + TILE_SIZE,
+                    ms_json_path=args.ms_buildings)
 
         out = build_dataset(args.out, name=args.name, transform=transform,
                             source=source, projection=projection,

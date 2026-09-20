@@ -64,10 +64,16 @@ dataset). See [PLAN.md](PLAN.md) for the full implementation plan.
   biome noise while a dataset is loaded, killing seed-random jungles and
   frozen rivers (biomes are resolved lazily because the overworld's
   parameter list is unbound during preset decode).
-- Buildings (Phase 8): `fetch-buildings` pulls OSM `building` footprints;
-  `buildings.py` rasterizes each polygon into a building class
-  (`0x40`: residential/commercial/industrial/civic/outbuilding/generic)
-  plus a `building_levels` layer (`0x80`: OSM `building:levels`, or
+- Buildings (Phase 8): two sources merged at the raster level.
+  `fetch-buildings` pulls OSM `building` footprints (real classes);
+  `fetch-buildings-ms` pulls Microsoft GlobalML footprints for the
+  quadkey tiles covering the bbox — OSM coverage is sparse in small-town
+  Nebraska (1,665 footprints), so ML detections fill in the rest (7,916
+  footprints, most with height estimates). `buildings.py` paints MS
+  footprints first at the lowest priority as GENERIC, then OSM classes
+  overwrite them wherever both cover a cell. Output: a building class
+  layer (`0x40`: residential/commercial/industrial/civic/outbuilding/
+  generic) plus `building_levels` (`0x80`: OSM `building:levels`, MS
   `height`/3, or a per-class default). The runtime extrudes deterministic
   shells — floor at terrain, walls to `terrain + levels*4`, a window band
   on the second level, flat roof — respecting roads and water, and clearing
