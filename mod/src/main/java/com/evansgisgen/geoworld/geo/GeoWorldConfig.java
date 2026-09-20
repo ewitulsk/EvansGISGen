@@ -35,7 +35,8 @@ public final class GeoWorldConfig {
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     private static final String FILE_NAME = "geoworld.json";
 
-    public record LoadedConfig(GeoTransform transform, @Nullable Path datasetPath) {}
+    public record LoadedConfig(GeoTransform transform, @Nullable Path datasetPath,
+                               @Nullable com.evansgisgen.geoworld.studio.Geocoder.Config geocoder) {}
 
     private GeoWorldConfig() {}
 
@@ -58,7 +59,28 @@ public final class GeoWorldConfig {
             LOGGER.warn("Failed to load {}, using defaults: {}", path, e.toString());
             root = GSON.fromJson(defaultJson(), JsonObject.class);
         }
-        return new LoadedConfig(parseTransform(root), parseDatasetPath(root));
+        return new LoadedConfig(parseTransform(root), parseDatasetPath(root),
+                parseGeocoder(root));
+    }
+
+    /**
+     * Optional runtime geocoder for studio address lookup. Absent (or
+     * {@code "provider": "none"}) disables the HTTP path entirely — parcel
+     * gazetteer and coordinates still work offline.
+     */
+    @Nullable
+    private static com.evansgisgen.geoworld.studio.Geocoder.Config parseGeocoder(
+            JsonObject root) {
+        JsonObject g = section(root, "geocoder");
+        String provider = g.has("provider") ? g.get("provider").getAsString() : null;
+        if (provider == null || provider.isBlank() || provider.equals("none")) {
+            return null;
+        }
+        return new com.evansgisgen.geoworld.studio.Geocoder.Config(
+                provider,
+                g.has("endpoint") ? g.get("endpoint").getAsString() : null,
+                g.has("timeout_ms") ? g.get("timeout_ms").getAsInt() : 400,
+                !g.has("autocomplete") || g.get("autocomplete").getAsBoolean());
     }
 
     public static GeoTransform parseTransform(JsonObject root) {

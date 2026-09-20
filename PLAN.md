@@ -781,17 +781,18 @@ The compiler gains `--parcels` (GeoJSON) → a `parcels.json` sidecar in the dat
 }
 ```
 
-`addresses` is a **gazetteer** merged from parcel situs fields, OSM `addr:*` tags (already fetched with buildings), and OpenAddresses where coverage exists — so Gage gets address lookup even though its parcel layer lacks them. Runtime `ParcelIndex` (lazy, like `LandmarkIndex`) does point-in-polygon and address match. The generator still never sees a shapefile.
+`addresses` is a **gazetteer** merged from parcel situs fields and OSM `addr:*` tags — so Gage gets address lookup even though its parcel layer lacks them. Runtime `ParcelIndex` does point-in-polygon and address match over a spatial-grid bucket index. The generator still never sees a shapefile. **Built**: `fetch-parcels` + `compile-parcels` → `parcels.json` (121K parcels: Lancaster `lan_*` with situs, Gage `gage_*` geometry-only; 104K gazetteer entries).
 
 ### Lookup: layered, degrades gracefully
 
 `/geoworld studio <query>` resolution order:
 
-1. **Gazetteer address match** — offline, normalized (uppercase, canonical suffixes, collapse whitespace); instant
-2. **Configured geocoder** → coords → point-in-polygon — optional (`geocoder` block in `geoworld.json`: `provider`, `endpoint`, `timeoutMs`; Census free/no-key, Nominatim, or any URL-template provider). Absent → clean error suggesting coordinates
-3. **Raw coordinates** — always works, zero dependencies
+1. **Rect** `"x0,z0 x1,z1"` (block coords) — every parcel intersecting it → a **multi-parcel lot** (a city block of the Haymarket at once)
+2. **Coordinates** `"x,z"` (block coords) — the containing parcel
+3. **Gazetteer address match** — offline, normalized (uppercase, canonical suffixes, collapse whitespace); instant
+4. **Configured geocoder** → coords → point-in-polygon — optional (`geocoder` block in `geoworld.json`: `provider` census|nominatim|photon, `endpoint`, `timeout_ms`, `autocomplete`). Absent → clean error suggesting coordinates
 
-Address ambiguity self-resolves: the index only contains dataset parcels, so a Beatrice address can't collide with a Lincoln one. Geocoder queries bias `viewbox` to dataset bounds for the same reason.
+Address ambiguity self-resolves: the index only contains dataset parcels, so a Beatrice address can't collide with a Lincoln one. Geocoder lat/lon results project through the manifest's `projection` block (`GeoProjection` — UTM forward).
 
 ### Autocomplete is a suggestion chain
 
@@ -802,16 +803,18 @@ Brigadier `SuggestionProvider` on the studio argument, merging:
 
 ### The studio dimension
 
-`geoworld:studio` — flat/void. Each parcel gets a **deterministic lot slot** (grid spaced by parcel bbox + margin; allocation persisted in world `SavedData`, so re-entering returns to work in progress).
+`geoworld:studio` — void-flat, fixed noon. Each selection gets a **deterministic lot slot** (512 m grid, allocation persisted in world `SavedData` `geoworld_studio` along with per-player sessions and return positions).
+
+A lot is a `ParcelSelection` — one parcel or many. Single parcels keep the `parcel_<id>` landmark key; a region becomes `lot_<hash>` of the sorted parcel-id set, so re-selecting the same block overwrites the same landmark. Selections are capped (~640 m span incl. context).
 
 `/geoworld studio <query>` (op-level 2) stages the lot:
 
-- **Real DEM elevation** for the parcel plus a ~64 m context ring — players build against actual grade and see neighboring lots
-- **Outlines**: active parcel boundary drawn bright, neighbors faint, footprint outline in a third material
-- **Existing state**: if a landmark is already registered for the parcel, its `.nbt` is placed into the lot for continued editing (overwrite path); otherwise the deterministic procedural shell is pasted as scaffolding (`bare` flag for a clean lot)
-- Teleport player in; return position saved in player data
+- **Real DEM elevation** for the selection plus a 32 m context ring — players build against actual grade and see neighboring lots
+- **Outlines**: selected parcels red, neighbors light gray, footprint edges yellow
+- **Existing state**: if a landmark is registered for the selection, its `.nbt` pastes into the lot for continued editing (overwrite path); otherwise procedural shells paste inside the selection as scaffolding (`bare` flag for a clean lot)
+- Teleport player in; return position saved in `SavedData`
 
-`/geoworld studio save` — `StructureTemplate.fillFromWorld` captures the lot region **including terrain** (basements, retaining walls, terraformed slope all persist) → writes `.nbt` → upserts a landmark entry keyed by parcel id. Same parcel → replace. This needs one new `TerrainPolicy` variant:
+`/geoworld studio save` — `StructureTemplate.fillFromWorld` captures the selection bbox **including terrain** (basements, retaining walls, terraformed slope all persist) → writes `.nbt` to the overlay → upserts a landmark entry keyed by selection id (`"parcels": [...]` recorded for provenance). Same selection → replace. It also stamps the template into the already-generated overworld immediately and reloads the live index. One new `TerrainPolicy` variant:
 
 ```java
 REPLACE_LOT   // template volume replaces the real lot volume, including
@@ -822,11 +825,11 @@ REPLACE_LOT   // template volume replaces the real lot volume, including
 
 ### User content never lives in the compiled dataset
 
-Saved builds go to an **overlay** (`user_landmarks/` in the world save or config dir), merged over the dataset's compiled `landmarks/` at `LandmarkIndex.load` — overlay wins on id collision. Dataset rebuilds can't wipe player work; the compiled dataset stays pure.
+Saved builds go to an **overlay** — `geoworld_landmarks/` in the world save (`landmarks.json` + `landmarks/*.nbt`), merged over the dataset's compiled `landmarks/` at `LandmarkIndex.load` — overlay wins on id collision. Dataset rebuilds can't wipe player work; the compiled dataset stays pure.
 
 ### Offline export for Structure Lab
 
-`geoworld_compiler export-parcel --address/--geo` → vanilla-format `.nbt` with parcel ring + footprint outline (+ optional real-terrain pad). Feeds `submit_structure` in MinecraftStructureInjector directly — the curation loop gets AI-assisted builds for free.
+`geoworld_compiler export-parcel --parcels <parcels.json> --query <e,n|address|e0,n0,e1,n1>` → vanilla-format `.nbt` with parcel rings (red) + footprint edges (yellow). A rect query exports every intersecting parcel — a whole city block for the Haymarket. Feeds `submit_structure` in MinecraftStructureInjector directly — the curation loop gets AI-assisted builds for free.
 
 ### Ordering
 

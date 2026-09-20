@@ -44,6 +44,23 @@ python -m geoworld_compiler fetch-landuse      --bbox ... --out FILE  # OSM land
 python -m geoworld_compiler fetch-buildings    --bbox ... --out FILE  # OSM buildings
 python -m geoworld_compiler fetch-buildings-ms --bbox ... --out FILE  # MS GlobalML
 
+# Parcels (Phase 12): ArcGIS parcel layer -> GeoJSON, then into the dataset
+python -m geoworld_compiler fetch-parcels \
+    --service https://gis.lincoln.ne.gov/public/rest/services/Assessor/TaxParcels/FeatureServer \
+    --layer 0 --bbox "minLon,minLat,maxLon,maxLat" --out ../sources/parcels_lancaster.geojson
+python -m geoworld_compiler compile-parcels --in ../sources/parcels_lancaster.geojson \
+    --anchor 40.2681,-96.7470 --id-field PARCELID --address-field SITEADDRESS \
+    --id-prefix lan_ --out ../datasets/beatrice.geoworld/parcels.json
+python -m geoworld_compiler compile-parcels --in ../sources/parcels_gage.geojson \
+    --anchor 40.2681,-96.7470 --id-field PID --address-field "" \
+    --id-prefix gage_ --append --out ../datasets/beatrice.geoworld/parcels.json
+
+# Lot outline .nbt for Structure Lab — query is 'e,n', an address, or a
+# rect 'e0,n0,e1,n1' exporting every intersecting parcel (a whole block)
+python -m geoworld_compiler export-parcel \
+    --parcels ../datasets/beatrice.geoworld/parcels.json \
+    --query "1100 O ST" --out /tmp/lot.nbt
+
 # Write a known-pattern .gwt tile (consumed by the mod's GeoTileTest)
 python -m geoworld_compiler fixture --out ../mod/src/test/resources/fixture.gwt
 
@@ -67,6 +84,10 @@ python -m pytest tests/ -q
   sources rasterized into per-cell layers over the dataset rect
 - `fetch.py` — USGS TNM DEM downloader; Overpass fetchers live beside their
   sources
+- `parcels.py` — ArcGIS parcel fetch (`fetch-parcels`), `parcels.json`
+  compile (`compile-parcels`), address gazetteer, lot-outline `.nbt`
+  export (`export-parcel`, single parcel or rect multi-parcel)
+- `nbtwrite.py` — minimal vanilla structure-template `.nbt` writer
 - `build.py` — tile coverage (rect bounds) + sampling + emission
 - `fixture.py` — deterministic test tile for cross-language format tests
 - `preview.py` — PNG debug renders

@@ -27,6 +27,7 @@ import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.level.levelgen.structure.BoundingBox;
 import net.minecraft.world.level.levelgen.structure.templatesystem.StructurePlaceSettings;
 import net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplate;
+import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -89,32 +90,47 @@ public final class LandmarkIndex {
         return byChunk.getOrDefault(pos.toLong(), List.of());
     }
 
+    /** The placed landmark with this id, for studio staging/replacement. */
+    public java.util.Optional<Placed> findById(String id) {
+        return all.stream().filter(p -> p.def().id().equals(id)).findFirst();
+    }
+
     /**
      * Loads {@code <dataset>/landmarks.json} and the referenced
      * {@code landmarks/*.nbt} templates. Needs a block registry, so this is
      * called lazily at first decoration, not at dataset load.
      */
     public static LandmarkIndex load(GeoDataset dataset, HolderGetter<Block> blocks) {
+        return load(dataset, blocks, null);
+    }
+
+    /**
+     * As {@link #load(GeoDataset, HolderGetter)}, additionally merging an
+     * overlay directory ({@code <overlay>/landmarks.json} + {@code
+     * landmarks/*.nbt}) — studio-saved lots live there so dataset rebuilds
+     * never discard player work. Overlay entries replace dataset entries
+     * with the same id.
+     */
+    public static LandmarkIndex load(GeoDataset dataset, HolderGetter<Block> blocks,
+            @Nullable Path overlayRoot) {
         Path root = dataset.root();
         if (root == null) {
             return EMPTY;
         }
-        Path file = root.resolve("landmarks.json");
-        if (!Files.isRegularFile(file)) {
-            return EMPTY;
+        // id -> (def, nbtDir); overlay entries overwrite dataset ones.
+        Map<String, Map.Entry<Landmark, Path>> defs = new java.util.LinkedHashMap<>();
+        collectDefs(root, defs);
+        if (overlayRoot != null) {
+            collectDefs(overlayRoot, defs);
         }
-        List<Landmark> defs;
-        try {
-            defs = Landmark.listFromJson(
-                    GSON.fromJson(Files.readString(file), JsonObject.class));
-        } catch (IOException | RuntimeException e) {
-            LOGGER.warn("Failed to read landmarks {}: {}", file, e.toString());
+        if (defs.isEmpty()) {
             return EMPTY;
         }
 
         Map<Long, List<Placed>> byChunk = new HashMap<>();
-        for (Landmark def : defs) {
-            Path nbt = root.resolve("landmarks").resolve(def.templatePath());
+        for (var entry : defs.values()) {
+            Landmark def = entry.getKey();
+            Path nbt = entry.getValue().resolve("landmarks").resolve(def.templatePath());
             try {
                 CompoundTag tag = NbtIo.readCompressed(nbt, NbtAccounter.unlimitedHeap());
                 StructureTemplate template = new StructureTemplate();
@@ -153,6 +169,23 @@ public final class LandmarkIndex {
             }
         }
         return new LandmarkIndex(byChunk);
+    }
+
+    /** Reads {@code <dir>/landmarks.json} into defs keyed by id. */
+    private static void collectDefs(Path dir,
+            Map<String, Map.Entry<Landmark, Path>> defs) {
+        Path file = dir.resolve("landmarks.json");
+        if (!Files.isRegularFile(file)) {
+            return;
+        }
+        try {
+            for (Landmark def : Landmark.listFromJson(
+                    GSON.fromJson(Files.readString(file), JsonObject.class))) {
+                defs.put(def.id(), Map.entry(def, dir));
+            }
+        } catch (IOException | RuntimeException e) {
+            LOGGER.warn("Failed to read landmarks {}: {}", file, e.toString());
+        }
     }
 
     /**
@@ -212,7 +245,10 @@ public final class LandmarkIndex {
     private static void applyTerrainPolicy(ChunkAccess chunk, Placed p,
             BoundingBox chunkBox) {
         TerrainPolicy policy = p.def().terrainPolicy();
-        if (policy == TerrainPolicy.NONE || policy == TerrainPolicy.FOLLOW_TERRAIN) {
+        // REPLACE_LOT templates carry their own terrain (air included) — no
+        // fill/cut pass; FOLLOW_TERRAIN runs its own post-pass.
+        if (policy == TerrainPolicy.NONE || policy == TerrainPolicy.FOLLOW_TERRAIN
+                || policy == TerrainPolicy.REPLACE_LOT) {
             return;
         }
         BoundingBox box = intersect(p.box(), chunkBox);

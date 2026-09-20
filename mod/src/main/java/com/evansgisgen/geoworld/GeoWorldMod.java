@@ -30,10 +30,17 @@ public final class GeoWorldMod {
             CHUNK_GENERATORS.register("geoworld", () -> GeoChunkGeneratorCodec.INSTANCE);
 
     private static GeoDataset dataset = GeoDataset.empty();
+    private static com.evansgisgen.geoworld.parcel.ParcelIndex parcels =
+            com.evansgisgen.geoworld.parcel.ParcelIndex.EMPTY;
+    private static com.evansgisgen.geoworld.studio.Geocoder geocoder =
+            new com.evansgisgen.geoworld.studio.Geocoder(null, GeoDataset.empty());
 
     public GeoWorldMod(IEventBus modEventBus) {
         LoadedConfig config = GeoWorldConfig.load();
         dataset = GeoDataset.load(config.datasetPath(), config.transform());
+        parcels = com.evansgisgen.geoworld.parcel.ParcelIndex.load(dataset.root());
+        geocoder = new com.evansgisgen.geoworld.studio.Geocoder(
+                config.geocoder(), dataset);
         GeoTransform t = dataset.transform();
         LOGGER.info("GeoWorld transform: origin=({}, {}) scale=({} horiz, {} vert m/block) datum=({} m -> y{})",
                 t.originX(), t.originZ(), t.horizontalMetersPerBlock(), t.verticalMetersPerBlock(),
@@ -55,5 +62,13 @@ public final class GeoWorldMod {
 
     public static GeoTransform transform() {
         return dataset.transform();
+    }
+
+    public static com.evansgisgen.geoworld.parcel.ParcelIndex parcels() {
+        return parcels;
+    }
+
+    public static com.evansgisgen.geoworld.studio.Geocoder geocoder() {
+        return geocoder;
     }
 }

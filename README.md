@@ -13,7 +13,7 @@ dataset). See [PLAN.md](PLAN.md) for the full implementation plan.
 └── format/     # dataset format spec
 ```
 
-## Current status: Phase 11
+## Current status: Phase 12
 
 - `GeoChunkGenerator` wraps a vanilla `ChunkGenerator` (`geoworld:geoworld`)
   and delegates everything to it, then deforms terrain from geographic data:
@@ -158,6 +158,48 @@ Block `(x, z)` maps to geo `(east_m, -north_m)` relative to the anchor at
 | Haymarket                          | 1431  | -60869|
 - Debug commands: `/geoworld info`, `/geoworld geo`,
   `/geoworld geo <east> <north>`.
+
+### The parcel studio (Phase 12)
+
+The dataset carries a `parcels.json` sidecar — real property polygons
+(121K parcels: Lancaster County `lan_*` with situs addresses, Gage County
+`gage_*` geometry-only) plus a 104K-entry address gazetteer. Op-level
+players can edit real lots in a dedicated `geoworld:studio` dimension
+(void-flat, fixed noon):
+
+```
+/geoworld studio <x,z>            # the parcel containing block (x,z)
+/geoworld studio <x0,z0 x1,z1>    # every parcel in the rect — a city block
+/geoworld studio <address>        # gazetteer match; geocoder fallback if configured
+/geoworld studio bare <query>     # same, but no procedural shell / landmark paste
+/geoworld studio save             # capture the lot -> overlay landmark -> return
+/geoworld studio exit             # leave without saving
+```
+
+Staging draws real DEM terrain plus a 32 m context ring, selected parcel
+lines in **red**, neighbor lines in **gray**, footprint edges in
+**yellow**, and pastes either the existing saved landmark or procedural
+shells as scaffolding. `save` captures the selection bbox (terrain
+included — basements and grading persist) into
+`<world>/geoworld_landmarks/` as a `REPLACE_LOT` landmark keyed by the
+selection (`parcel_<id>` for singles, `lot_<hash>` for blocks), reloads
+the live index, and stamps the build into the overworld immediately.
+Re-selecting the same parcel or block overwrites the same landmark.
+Overlay landmarks merge over the dataset's compiled set, so dataset
+rebuilds never discard player work.
+
+Offline handoff to Structure Lab: `export-parcel` writes a vanilla `.nbt`
+of lot outlines (red parcel ring, yellow footprint edges); a rect query
+exports a whole block at once.
+
+Optional address geocoding (`config/geoworld.json`):
+
+```json
+"geocoder": {"provider": "census", "timeout_ms": 400}
+```
+
+Providers `census` (free, no key), `nominatim`, `photon` (autocomplete).
+Without it, address lookup uses the offline gazetteer and coordinates.
 
 ## Scripted in-game tests
 

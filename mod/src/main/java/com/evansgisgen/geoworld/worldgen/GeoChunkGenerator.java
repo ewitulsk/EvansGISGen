@@ -547,7 +547,9 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
         // Geographic passes run before vanilla decoration: land-use surfaces
         // and building shells replace the top terrain, then roads are paved
         // so vegetation cannot plant on them.
-        LandmarkIndex landmarks = landmarks(level.registryAccess());
+        LandmarkIndex landmarks = landmarks(level.registryAccess(),
+                com.evansgisgen.geoworld.studio.StudioService.overlayRoot(
+                        level.getLevel()));
         applySurface(chunk);
         buildBuildings(chunk, landmarks);
         paveRoads(chunk);
@@ -567,8 +569,22 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
      * the block registry, which isn't available at generator construction.
      */
     private volatile LandmarkIndex landmarkIndex;
+    @Nullable private volatile java.nio.file.Path overlayRoot;
 
     public LandmarkIndex landmarks(RegistryAccess registryAccess) {
+        return landmarks(registryAccess, null);
+    }
+
+    /**
+     * Resolves the dataset's landmarks plus the world-save overlay directory
+     * (studio-saved lots). The overlay path is discovered once from the
+     * decorating level and retained for reloads.
+     */
+    public LandmarkIndex landmarks(RegistryAccess registryAccess,
+            @Nullable java.nio.file.Path overlay) {
+        if (overlay != null) {
+            overlayRoot = overlay;
+        }
         LandmarkIndex index = landmarkIndex;
         if (index == null) {
             synchronized (this) {
@@ -577,12 +593,21 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
                     index = dataset.isEmpty()
                             ? LandmarkIndex.EMPTY
                             : LandmarkIndex.load(dataset,
-                                    registryAccess.lookupOrThrow(Registries.BLOCK));
+                                    registryAccess.lookupOrThrow(Registries.BLOCK),
+                                    overlayRoot);
                     landmarkIndex = index;
                 }
             }
         }
         return index;
+    }
+
+    /** Drops the cached index so the next access re-reads overlay files. */
+    public void reloadLandmarks(RegistryAccess registryAccess,
+            java.nio.file.Path overlay) {
+        overlayRoot = overlay;
+        landmarkIndex = null;
+        landmarks(registryAccess, overlay);
     }
 
     /**

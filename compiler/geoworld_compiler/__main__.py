@@ -113,6 +113,48 @@ def main(argv: list[str] | None = None) -> int:
                     help="'minLon,minLat,maxLon,maxLat' in WGS84 degrees")
     fm.add_argument("--out", required=True, help="output JSON path")
 
+    fp = sub.add_parser("fetch-parcels",
+                        help="paged bbox query against an ArcGIS "
+                             "parcel layer (FeatureServer or MapServer)")
+    fp.add_argument("--service", required=True,
+                    help="ArcGIS service root URL, e.g. .../MapServer")
+    fp.add_argument("--layer", type=int, required=True)
+    fp.add_argument("--bbox", required=True,
+                    help="'minLon,minLat,maxLon,maxLat' in WGS84 degrees")
+    fp.add_argument("--out", required=True, help="output GeoJSON path")
+
+    cp = sub.add_parser("compile-parcels",
+                        help="merge fetched parcel GeoJSONs into a dataset "
+                             "parcels.json (rings in geo meters + gazetteer)")
+    cp.add_argument("--in", dest="inputs", nargs="+", required=True,
+                    help="GeoJSON paths from fetch-parcels")
+    cp.add_argument("--osm-addr", nargs="+", default=None,
+                    help="OSM JSONs to mine for addr:* gazetteer entries")
+    cp.add_argument("--anchor", required=True,
+                    help="'lat,lon' anchoring the geo origin in the CRS")
+    cp.add_argument("--crs", default="EPSG:32614")
+    cp.add_argument("--id-field", default="PARCELID")
+    cp.add_argument("--address-field", default="SITEADDRESS",
+                    help="situs address property; '' when the layer has none")
+    cp.add_argument("--id-prefix", default="",
+                    help="namespace prefix for parcel ids (e.g. 'gage_')")
+    cp.add_argument("--append", action="store_true",
+                    help="merge into an existing parcels.json (multi-county)")
+    cp.add_argument("--out", required=True, help="output parcels.json path")
+
+    ep = sub.add_parser("export-parcel",
+                        help="export a lot outline .nbt (parcel boundary + "
+                             "building footprint) for Structure Lab handoff")
+    ep.add_argument("--parcels", required=True, help="dataset parcels.json")
+    ep.add_argument("--query", required=True,
+                    help="'east,north' geo meters or an address string")
+    ep.add_argument("--buildings", default=None,
+                    help="optional OSM buildings GeoJSON for footprint edges")
+    ep.add_argument("--anchor", default=None,
+                    help="'lat,lon' (required with --buildings)")
+    ep.add_argument("--crs", default="EPSG:32614")
+    ep.add_argument("--out", required=True, help="output .nbt path")
+
     f = sub.add_parser("fixture", help="write a known-pattern test tile")
     f.add_argument("--out", required=True, help="output .gwt path")
 
@@ -169,6 +211,46 @@ def main(argv: list[str] | None = None) -> int:
         min_lon, min_lat, max_lon, max_lat = (
             float(s) for s in args.bbox.split(","))
         print(fetch_buildings_ms(min_lon, min_lat, max_lon, max_lat, args.out))
+        return 0
+
+    if args.command == "fetch-parcels":
+        from .parcels import fetch_parcels
+
+        min_lon, min_lat, max_lon, max_lat = (
+            float(s) for s in args.bbox.split(","))
+        print(fetch_parcels(args.service, args.layer,
+                            min_lon, min_lat, max_lon, max_lat, args.out))
+        return 0
+
+    if args.command == "compile-parcels":
+        from .parcels import add_osm_addresses, compile_parcels
+        from .transform import Projection
+
+        lat, lon = (float(s) for s in args.anchor.split(","))
+        projection = Projection(args.crs, lat, lon)
+        out = compile_parcels(args.inputs, projection, args.out,
+                              id_field=args.id_field,
+                              address_field=args.address_field,
+                              id_prefix=args.id_prefix,
+                              append=args.append)
+        if args.osm_addr:
+            n = add_osm_addresses(args.osm_addr, projection, out)
+            print(f"added {n} OSM address entries")
+        return 0
+
+    if args.command == "export-parcel":
+        from .parcels import export_parcel
+        from .transform import Projection
+
+        projection = None
+        if args.buildings:
+            if not args.anchor:
+                parser.error("--buildings requires --anchor lat,lon")
+            lat, lon = (float(s) for s in args.anchor.split(","))
+            projection = Projection(args.crs, lat, lon)
+        print(export_parcel(args.parcels, args.query, args.out,
+                            buildings_geojson=args.buildings,
+                            projection=projection))
         return 0
 
     if args.command == "build":

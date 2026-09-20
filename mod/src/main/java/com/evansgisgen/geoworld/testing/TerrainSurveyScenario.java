@@ -307,6 +307,75 @@ public final class TerrainSurveyScenario {
                 pass &= check("landmark_demo_house", wall && door && roof);
             }
         }
+        // Phase 12: parcel studio — stage a real Beatrice lot in
+        // geoworld:studio, verify staged terrain + boundary markers, then
+        // capture it back into the overlay as a REPLACE_LOT landmark and
+        // confirm the live index registers it (and stays single on re-save).
+        {
+            ServerLevel studio = server.getLevel(
+                    com.evansgisgen.geoworld.studio.StudioService.STUDIO);
+            com.evansgisgen.geoworld.parcel.ParcelIndex parcels =
+                    GeoWorldMod.parcels();
+            pass &= check("studio_dimension", studio != null);
+            pass &= check("studio_parcels_loaded", !parcels.isEmpty());
+            com.evansgisgen.geoworld.parcel.Parcel lot =
+                    parcels.byId("gage_009565000");
+            pass &= check("studio_parcel_found", lot != null);
+            if (studio != null && lot != null
+                    && gen instanceof com.evansgisgen.geoworld.worldgen
+                            .GeoChunkGenerator geoGen) {
+                var sel = com.evansgisgen.geoworld.parcel.ParcelSelection
+                        .single(lot);
+                com.evansgisgen.geoworld.studio.StudioData data =
+                        com.evansgisgen.geoworld.studio.StudioData.get(level);
+                BlockPos lotOrigin = data.lotSlot(sel.landmarkId());
+                com.evansgisgen.geoworld.studio.StudioService.stage(studio,
+                        dataset, parcels, landmarkIndex, sel, lotOrigin, true);
+
+                // Parcel center -> studio column; ground block must be solid.
+                double ce = (lot.minEast() + lot.maxEast()) / 2.0;
+                double cn = (lot.minNorth() + lot.maxNorth()) / 2.0;
+                int sx = lotOrigin.getX() + dataset.blockX(ce)
+                        - dataset.blockX(lot.minEast() - 32);
+                int sz = lotOrigin.getZ() + dataset.blockZ(cn)
+                        - dataset.blockZ(lot.maxNorth() + 32);
+                int gy = dataset.elevationAt(dataset.blockX(ce),
+                        dataset.blockZ(cn));
+                BlockPos.MutableBlockPos sp = new BlockPos.MutableBlockPos();
+                pass &= check("studio_terrain_staged",
+                        gy != GeoTile.NO_DATA
+                                && !studio.getBlockState(sp.set(sx, gy, sz))
+                                        .isAir()
+                                && studio.getBlockState(sp.set(sx, gy + 4, sz))
+                                        .isAir());
+                // Boundary ring: red concrete markers somewhere in the lot.
+                boolean ring = false;
+                for (int x = lotOrigin.getX(); x < lotOrigin.getX() + 200 && !ring; x++) {
+                    for (int z = lotOrigin.getZ(); z < lotOrigin.getZ() + 200 && !ring; z++) {
+                        if (studio.getBlockState(sp.set(x, gy + 1, z))
+                                .is(Blocks.RED_CONCRETE)) {
+                            ring = true;
+                        }
+                    }
+                }
+                pass &= check("studio_parcel_outline", ring);
+
+                // Capture + register; then re-save to prove overwrite-by-id.
+                var r1 = com.evansgisgen.geoworld.studio.StudioService.saveLot(
+                        studio, level, dataset, sel, lotOrigin, geoGen);
+                var r2 = com.evansgisgen.geoworld.studio.StudioService.saveLot(
+                        studio, level, dataset, sel, lotOrigin, geoGen);
+                pass &= check("studio_save", r1.ok() && r2.ok());
+                var registered = geoGen.landmarks(level.registryAccess(),
+                        com.evansgisgen.geoworld.studio.StudioService
+                                .overlayRoot(level))
+                        .findById(sel.landmarkId());
+                pass &= check("studio_landmark_registered", registered.isPresent()
+                        && registered.get().def().terrainPolicy()
+                                == com.evansgisgen.geoworld.landmark
+                                        .TerrainPolicy.REPLACE_LOT);
+            }
+        }
         LOGGER.info("GEOWORLD-RESULT {}", pass ? "PASS" : "FAIL");
     }
 

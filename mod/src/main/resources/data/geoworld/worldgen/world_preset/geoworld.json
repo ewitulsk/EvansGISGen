@@ -34,6 +34,19 @@
         },
         "settings": "minecraft:nether"
       }
+    },
+    "geoworld:studio": {
+      "type": "geoworld:studio",
+      "generator": {
+        "type": "minecraft:flat",
+        "settings": {
+          "biome": "minecraft:plains",
+          "lakes": false,
+          "features": false,
+          "layers": [],
+          "structure_overrides": []
+        }
+      }
     }
   }
 }

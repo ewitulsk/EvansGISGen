@@ -15,13 +15,18 @@ import java.util.Locale;
  *       inside the footprint.
  *   <li>{@code FOLLOW_TERRAIN} — don't touch terrain; extend each column's
  *       lowest template block straight down until it meets ground.
+ *   <li>{@code REPLACE_LOT} — the template owns its whole bounding volume,
+ *       terrain included (a studio-saved lot captures ground + build
+ *       together). No fill/cut pass; the template's own blocks — air
+ *       included — replace the volume outright.
  * </ul>
  */
 public enum TerrainPolicy {
     NONE,
     LEVEL_FOUNDATION,
     CUT_AND_FILL,
-    FOLLOW_TERRAIN;
+    FOLLOW_TERRAIN,
+    REPLACE_LOT;
 
     public static TerrainPolicy parse(String value) {
         if (value == null) {

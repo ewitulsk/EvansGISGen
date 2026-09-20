@@ -37,3 +37,6 @@ datasets/*/debug/
 
 # Scripted test run artifacts
 artifacts/
+
+# Raw fetched GIS sources (re-fetch via geoworld_compiler fetch-*)
+sources/

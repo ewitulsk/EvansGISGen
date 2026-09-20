@@ -34,22 +34,26 @@ public final class GeoDataset {
     private final int tileCount;
     private final GeoTransform transform;
     private final int tileSize;
+    @Nullable private final GeoProjection projection;
     private final LoadingCache<Long, Optional<GeoTile>> tiles;
 
     private GeoDataset(@Nullable Path root, String name, int tileCount,
-            GeoTransform transform, int tileSize) {
+            GeoTransform transform, int tileSize,
+            @Nullable GeoProjection projection) {
         this.root = root;
         this.name = name;
         this.tileCount = tileCount;
         this.transform = transform;
         this.tileSize = tileSize;
+        this.projection = projection;
         this.tiles = CacheBuilder.newBuilder()
                 .maximumSize(MAX_CACHED_TILES)
                 .build(CacheLoader.from(this::loadTile));
     }
 
     public static GeoDataset empty() {
-        return new GeoDataset(null, "<none>", 0, GeoTransform.DEFAULT, DEFAULT_TILE_SIZE);
+        return new GeoDataset(null, "<none>", 0, GeoTransform.DEFAULT,
+                DEFAULT_TILE_SIZE, null);
     }
 
     /**
@@ -58,12 +62,12 @@ public final class GeoDataset {
      */
     public static GeoDataset load(@Nullable Path root, GeoTransform fallbackTransform) {
         if (root == null || !Files.isDirectory(root)) {
-            return new GeoDataset(null, "<none>", 0, fallbackTransform, DEFAULT_TILE_SIZE);
+            return new GeoDataset(null, "<none>", 0, fallbackTransform, DEFAULT_TILE_SIZE, null);
         }
         Path manifestFile = root.resolve("manifest.json");
         if (!Files.isRegularFile(manifestFile)) {
             LOGGER.warn("Dataset at {} has no manifest.json; ignoring", root);
-            return new GeoDataset(null, "<none>", 0, fallbackTransform, DEFAULT_TILE_SIZE);
+            return new GeoDataset(null, "<none>", 0, fallbackTransform, DEFAULT_TILE_SIZE, null);
         }
         try {
             JsonObject manifest = GSON.fromJson(Files.readString(manifestFile), JsonObject.class);
@@ -73,11 +77,19 @@ public final class GeoDataset {
             int tileSize = manifest.has("tile_size") ? manifest.get("tile_size").getAsInt() : DEFAULT_TILE_SIZE;
             String name = manifest.has("name") ? manifest.get("name").getAsString() : root.getFileName().toString();
             int tileCount = manifest.has("tile_count") ? manifest.get("tile_count").getAsInt() : -1;
+            GeoProjection projection = null;
+            if (manifest.has("projection") && manifest.get("projection").isJsonObject()) {
+                JsonObject proj = manifest.getAsJsonObject("projection");
+                projection = GeoProjection.parse(
+                        proj.has("crs") ? proj.get("crs").getAsString() : null,
+                        proj.has("geo_anchor_east_m") ? proj.get("geo_anchor_east_m").getAsDouble() : 0.0,
+                        proj.has("geo_anchor_north_m") ? proj.get("geo_anchor_north_m").getAsDouble() : 0.0);
+            }
             LOGGER.info("Loaded GeoWorld dataset '{}' from {} ({} tiles)", name, root, tileCount);
-            return new GeoDataset(root, name, tileCount, transform, tileSize);
+            return new GeoDataset(root, name, tileCount, transform, tileSize, projection);
         } catch (IOException | RuntimeException e) {
             LOGGER.warn("Failed to read dataset manifest {}: {}", manifestFile, e.toString());
-            return new GeoDataset(null, "<none>", 0, fallbackTransform, DEFAULT_TILE_SIZE);
+            return new GeoDataset(null, "<none>", 0, fallbackTransform, DEFAULT_TILE_SIZE, null);
         }
     }
 
@@ -104,6 +116,11 @@ public final class GeoDataset {
 
     public int tileSize() {
         return tileSize;
+    }
+
+    /** Lat/lon -> geo-meters projection; absent when the manifest has none. */
+    public Optional<GeoProjection> projection() {
+        return Optional.ofNullable(projection);
     }
 
     /** Tile-local coordinate of a block position (0..tileSize-1). */
@@ -163,6 +180,14 @@ public final class GeoDataset {
     public int waterDepthAt(int x, int z) {
         GeoTile tile = tileAt(x, z).orElse(null);
         return tile == null ? 0 : tile.waterDepth(localCoord(x), localCoord(z));
+    }
+
+    /** Minecraft Y of the dataset terrain surface; NO_DATA outside tiles. */
+    public int elevationAt(int x, int z) {
+        GeoTile tile = tileAt(x, z).orElse(null);
+        return tile == null || !tile.hasElevation()
+                ? GeoTile.NO_DATA
+                : tile.elevation(localCoord(x), localCoord(z));
     }
 
     public int buildingClassAt(int x, int z) {
