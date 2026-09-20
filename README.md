@@ -137,17 +137,25 @@ dataset). See [PLAN.md](PLAN.md) for the full implementation plan.
   conservative rect tests for the ramps. OSM fetches for Lincoln were
   split into sub-bbox pulls (Overpass 504s on city-sized queries) and
   merged with `scripts/merge_osm.py`.
+- Marysville (Phase 14): the corridor reaches ~40 km *south* too — bounds
+  grew to ~22 × 123 km and a second claimed region
+  (`3000,-52000,17000,-25000`) holds the south half at full detail.
+  US-77 stays `trunk` so the corridor ramp follows it on its own; the
+  region rect exists because 347 8th Rd sits ~4 km off the highway —
+  outside the ramp's reach — and to hold Oketo + Marysville proper. Kansas DEM coverage came from the USGS statewide collections
+  the same TNM fetch pulls.
 - `geoworld_compiler` (Python) writes the format: `manifest.json` + 256x256
   tiles with zlib-compressed sections (elevation int16, influence u8,
   surface/road u8, water bitset, water depth u8, building u8 + levels u8). `dem.py` mosaics + reprojects real elevation
   rasters (rasterio/pyproj) onto the geo meter grid; `fetch.py` downloads
   USGS 3DEP 1 m DEM tiles from The National Map.
 - `datasets/beatrice.geoworld` is real USGS 1 m LiDAR terrain for
-  Beatrice, NE plus the US-77 corridor and Lincoln: the 8 km square
-  around downtown, a ~4 km-wide strip running ~60 km north through
-  Pickrell/Cortland/Princeton, and the Lincoln metro region
-  (372-428 m real elevation). Spawn is downtown Beatrice; the Big Blue
-  River valley is visible east of the origin.
+  Beatrice, NE plus the US-77 corridor in both directions and Lincoln:
+  the 8 km square around downtown, a ~4 km-wide strip running ~60 km
+  north through Pickrell/Cortland/Princeton, the Lincoln metro region,
+  and a full-detail south band down US-77 through Wymore and Oketo to
+  Marysville, KS (372-428 m real elevation). Spawn is downtown Beatrice;
+  the Big Blue River valley is visible east of the origin.
   `datasets/synthetic.geoworld` remains as the no-GIS pipeline test.
 
 ### Beatrice landmarks (block coords)
@@ -171,6 +179,9 @@ Block `(x, z)` maps to geo `(east_m, -north_m)` relative to the anchor at
 | Nebraska State Capitol             | 2474  | -60052|
 | Memorial Stadium (UNL)             | 1923  | -61426|
 | Haymarket                          | 1431  | -60869|
+| Oketo, KS                          | 13484 | 33561 |
+| 347 8th Rd, Marysville KS          | 6902  | 33390 |
+| Downtown Marysville, KS            | 9750  | 47113 |
 - Debug commands: `/geoworld info`, `/geoworld geo`,
   `/geoworld geo <east> <north>`.
 

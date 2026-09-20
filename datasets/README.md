@@ -4,10 +4,12 @@ Compiled `.geoworld` datasets live here. They are build artifacts of the
 compiler (`compiler/`), but small enough to commit.
 
 - `beatrice.geoworld` — real terrain for Beatrice, NE plus the US-77
-  corridor and the Lincoln metro, compiled from USGS 3DEP 1 m DEM tiles
-  (`NE_SouthernNE_2018_D19` + `NE_Eastern_UA_2016`, fetched into `raw/` via
-  `geoworld_compiler fetch`). Covers ~17 x 80 km anchored at Beatrice
-  (40.2681 N, -96.7470 W); influence ramps to vanilla at region edges.
+  corridor both directions — Lincoln metro north, Wymore/Oketo/Marysville
+  KS south — compiled from USGS 3DEP 1 m DEM tiles
+  (`NE_SouthernNE_2018_D19` + `NE_Eastern_UA_2016` + `KS_Statewide_2018`,
+  fetched into `raw/` via `geoworld_compiler fetch`). Covers ~22 x 123 km
+  anchored at Beatrice (40.2681 N, -96.7470 W); influence ramps to vanilla
+  at region edges.
   Sidecars: `landmarks/` (curated .nbt), `parcels.json` (Phase 12 lot index),
   `signs.json` (Phase 13 street-name + stop/yield placements).
 - `synthetic.geoworld` — generated test dataset: rolling synthetic terrain +

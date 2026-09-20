@@ -881,6 +881,22 @@ Runtime `SignIndex` (same lazy sidecar pattern as `ParcelIndex`/`LandmarkIndex`)
 
 ---
 
+## Phase 14 — US-77 south: Marysville, Oketo, and the farm
+
+Same engine, same corridor primitive — the dataset's southern reach extends ~40 km down US-77 from Beatrice through Wymore and Oketo to Marysville, Kansas. (Barneston is ~7 km east of US-77 — off-route — so it stays vanilla.)
+
+### What changes
+
+- **Bounds** extend south and east: `-4600,-53000,17000,70400` — Marysville sits at geo `e≈9750, n≈−47100`, ~4 km past the old southern edge.
+- **Corridor**: no work needed — US-77 is tagged `trunk` its whole length, so `CorridorRamp` follows it south automatically once the road data exists.
+- **Region**: a claimed rect `3000,-52000,17000,-25000` holds the corridor's south half at full detail. This matters because **347 8th Rd, Marysville KS 66508** (geocoded to geo `e≈6902, n≈−33390`, ~14 km north of downtown Marysville) sits **4.3 km east of US-77** — beyond the corridor ramp's ~2 km reach, so a strip along the highway alone would miss it. The rect also swallows Oketo (`e≈13484, n≈−33561`) and Marysville proper.
+- **Data**: new DEM tiles (USGS 1 m, bbox `−96.85,39.78,−96.42,40.10`) and south OSM pulls (roads incl. traffic nodes, water, landuse, OSM + MS buildings, bbox `−96.85,39.78,−96.42,40.20`) merged into the `*_all.json` inputs.
+- **Parcels**: unchanged — Marshall County KS has no public ArcGIS parcel layer wired in; the studio degrades to coordinates there. The address's inclusion is about the world, not the parcel book.
+
+**Definition of done:** tiles exist at Marysville (`x≈9750, z≈47113`), Oketo, and the address (`x≈6902, z≈33390`) with real DEM heights; US-77 renders continuously Beatrice → Marysville; the survey still passes.
+
+---
+
 ## Runtime Architecture
 
 The runtime architecture to aim for:

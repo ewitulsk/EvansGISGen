@@ -40,3 +40,6 @@ artifacts/
 
 # Raw fetched GIS sources (re-fetch via geoworld_compiler fetch-*)
 sources/
+
+# Built mod jars at repo root (build via :mod:jar)
+/geoworld-*.jar

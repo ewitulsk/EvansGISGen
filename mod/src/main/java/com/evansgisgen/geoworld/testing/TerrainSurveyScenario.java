@@ -68,6 +68,10 @@ public final class TerrainSurveyScenario {
             // Elevated decks (Phase 13): the I-180/US-34 viaduct west of
             // Memorial Stadium and the Haymarket-area overpasses.
             {1570, -61430}, {1632, -60650}, {1550, -60638}, {1444, -60188},
+            // South corridor (Phase 14): US-77 at Oketo's latitude, Oketo
+            // itself, the 347 8th Rd farm address (~1.6 km east of the
+            // highway, inside the claimed region), and Marysville.
+            {8521, 33321}, {13484, 33561}, {6902, 33390}, {9750, 47113},
             {5000, 0}, {-5000, -5000},
     };
 

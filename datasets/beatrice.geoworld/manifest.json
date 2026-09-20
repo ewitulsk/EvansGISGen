@@ -33,11 +33,11 @@
     "building",
     "building_levels"
   ],
-  "tile_count": 9618,
+  "tile_count": 17652,
   "bounds": {
-    "min_tile_x": -21,
-    "max_tile_x": 48,
+    "min_tile_x": -19,
+    "max_tile_x": 66,
     "min_tile_z": -275,
-    "max_tile_z": 37
+    "max_tile_z": 205
   }
 }
