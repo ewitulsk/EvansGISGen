@@ -842,6 +842,45 @@ Saved builds go to an **overlay** — `geoworld_landmarks/` in the world save (`
 
 ---
 
+## Phase 13 — Vertical roads and street signs
+
+Roads today are painted onto terrain: the DEM carries at-grade pavement, so a motorway viaduct or a loop ramp renders as a stripe of gray concrete *on the ground* — the Memorial Stadium interchange (I-180/US-34) currently shows its ramps projected flat. Phase 13 gives roads a third dimension and puts signs where signs go.
+
+### Elevation model
+
+OSM does not give absolute deck heights — it gives `layer` ordering and `bridge`/`tunnel` flags. The compiler resolves heights:
+
+- Every way keeps `layer` (default 0), `bridge`, `tunnel`, `name`, `ref`. `*_link` classes are added (ramps were previously dropped entirely).
+- For each `bridge=*` way, per-vertex required height = `max(DEM(v), under_surface + clearance)` where under-features are detected by segment proximity: lower-level road ways (+5 m), rail lines from the landuse fetch (+4.5 m), water via the hydro depth raster (+3 m over the water surface). Interior vertices floor at the way's max detected requirement (viaducts are level); endpoints that touch an at-grade way stay pinned to the DEM so decks land on their approaches.
+- A slope-limited envelope (max grade ~8%, forward/backward relaxation) ramps the profile between pins — a +5 m crossing spreads its rise ~60 m each way.
+- Embankments need no work: they are terrain, and the DEM already carries them.
+
+### Tile format
+
+Two new optional layers (backward-compatible mask bits `0x100`/`0x200`):
+
+- `roadz` i16 — deck top block-Y where an elevated deck covers the column, `NODATA` elsewhere. Only emitted where the resolved deck is ≥ ~1.5 m above the DEM so embanked ramps still render as ordinary terrain.
+- `roade` u8 — the deck's cross-section class (shoulders reclass to asphalt; no gravel on a bridge).
+
+The existing `road` layer still carries the *at-grade* surface — a road passing under a bridge paints both layers.
+
+### Runtime
+
+`paveRoads` gains the deck path: deck cells place a two-block slab (structural under-block + class surface at `roadz`), guardrail walls along deck edges, and pillar supports down to terrain on a deterministic grid where the gap is ≥3 m. Air under the deck is left open — underpasses and river water stay real. The old wet-culvert deck hack remains as the fallback for wet road cells with no `roadz`.
+
+### Signs
+
+`fetch_roads` additionally pulls `node["highway"~"stop|give_way|traffic_signals"]`. The compiler emits a `signs.json` sidecar:
+
+- **Street-name signs** at intersections of named ways (shared-vertex detection; link/motorway classes excluded), offset to a corner past both road widths, one sign listing both street names, blade facing the cross-street's bearing.
+- **Stop/yield signs** at their OSM node, offset to the right of travel, facing oncoming traffic.
+
+Runtime `SignIndex` (same lazy sidecar pattern as `ParcelIndex`/`LandmarkIndex`) places a post + standing sign during decoration and sets the `SignBlockEntity` text — real names on real corners.
+
+**Definition of done:** the I-180/US-34 viaduct east of Memorial Stadium renders as an elevated deck with supports and rails, its loop ramps climb and span, the Big Blue bridges float over open water, a downtown corner carries a readable street-name sign, and the scripted survey asserts deck height/clearance at known overpass coordinates.
+
+---
+
 ## Runtime Architecture
 
 The runtime architecture to aim for:

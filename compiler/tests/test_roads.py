@@ -1,6 +1,7 @@
 """RoadSource tests: OSM highways -> per-cell road surface classes."""
 
 import json
+import math
 
 import pytest
 
@@ -47,12 +48,13 @@ def test_parse_filters_and_tags(projection):
     ]}
     roads = parse_osm_roads(data, projection)
     assert len(roads) == 3                      # footway skipped
-    by_hw = sorted(roads, key=lambda r: r[0].half)
+    by_hw = sorted(roads, key=lambda r: r.params.half)
     # lanes=4 widened the second residential way past the default.
-    assert any(p.half > 5.0 for p, _ in roads)
+    assert any(f.params.half > 5.0 for f in roads)
     # sidewalk=both gave the trunk a curb + walk band.
-    trunk = next(p for p, _ in roads if p.prio == 90)
-    assert trunk.curb > 0 and trunk.walk > 0 and trunk.shoulder == 0
+    trunk = next(f for f in roads if f.params.prio == 90)
+    assert trunk.params.curb > 0 and trunk.params.walk > 0 \
+        and trunk.params.shoulder == 0
 
 
 def test_cross_section(tmp_path, projection):
@@ -115,3 +117,71 @@ def test_corridor_polylines(tmp_path, projection):
     assert e0 == pytest.approx(0.0, abs=0.5)
     assert n0 == pytest.approx(-50.0, abs=0.5)
     assert n1 == pytest.approx(50.0, abs=0.5)
+
+
+def test_link_classes_parse(projection):
+    # motorway_link ramps were previously dropped — they carry the
+    # cloverleaf loops, so they must parse with a narrow cross-section.
+    roads = parse_osm_roads({"elements": [
+        _way(1, {"highway": "motorway_link", "bridge": "yes", "layer": "1"},
+             [(0.0, 0.0), (60.0, 0.0)]),
+    ]}, projection)
+    assert len(roads) == 1
+    f = roads[0]
+    assert f.bridge and f.level == 1 and f.params.half == 4.0
+
+
+def test_bridge_deck_clears_crossing(tmp_path, projection):
+    # An east-west bridge way crosses a north-south street at grade.
+    # Flat DEM at 100 m: the deck must rise ~5 m over the street and
+    # land back at grade at its endpoints (which touch the street).
+    path = _write(tmp_path, [
+        _way(1, {"highway": "secondary"},
+             [(0.0, -80.0), (0.0, 80.0)]),
+        _way(2, {"highway": "secondary", "bridge": "yes", "layer": "1"},
+             [(-80.0, 0.0), (80.0, 0.0)]),
+    ])
+    elev = lambda e, n: 100.0
+    src = RoadSource(path, projection,
+                     bounds=(-120.0, -120.0, 120.0, 120.0),
+                     elev_m=elev)
+    # Over the crossing the deck floats ~5 m up.
+    assert src.deck_m(0.0, 0.0) == pytest.approx(105.0, abs=1.0)
+    assert src.deck_class(0.0, 0.0) in (ROAD_ASPHALT, ROAD_MARKING)
+    # The lower street still paves at grade under the deck.
+    assert src.road_class(0.0, 0.0) in (ROAD_ASPHALT, ROAD_MARKING)
+    # Deck fades to grade along the span (8% envelope).
+    assert src.deck_m(-79.0, 0.0) < 103.0
+    # Clear of the crossing the bridge way's own band has no deck.
+    assert src.deck_m(0.0, 30.0) < 0.0
+
+
+def test_street_name_sign_at_intersection(tmp_path, projection):
+    path = _write(tmp_path, [
+        _way(1, {"highway": "residential", "name": "South 14th Street"},
+             [(-60.0, 0.0), (0.0, 0.0), (60.0, 0.0)]),
+        _way(2, {"highway": "secondary", "name": "Court Street"},
+             [(0.0, -60.0), (0.0, 0.0), (0.0, 60.0)]),
+    ])
+    src = RoadSource(path, projection, bounds=(-90.0, -90.0, 90.0, 90.0))
+    name_signs = [s for s in src.signs if s["type"] == "street_name"]
+    assert len(name_signs) == 1
+    s = name_signs[0]
+    assert s["lines"] == ["COURT ST", "S 14TH ST"]
+    # Offset past both road widths, off the pavement.
+    assert math.hypot(s["e"], s["n"]) > 5.0
+
+
+def test_stop_sign_from_node(tmp_path, projection):
+    path = _write(tmp_path, [
+        _way(1, {"highway": "residential"},
+             [(-60.0, 0.0), (60.0, 0.0)]),
+        {"type": "node", "id": 7, "tags": {"highway": "stop"},
+         "lat": _way(0, {}, [(10.0, 0.0)])["geometry"][0]["lat"],
+         "lon": _way(0, {}, [(10.0, 0.0)])["geometry"][0]["lon"]},
+    ])
+    src = RoadSource(path, projection, bounds=(-90.0, -90.0, 90.0, 90.0))
+    stops = [s for s in src.signs if s["type"] == "stop"]
+    assert len(stops) == 1
+    assert stops[0]["lines"] == ["STOP"]
+    assert abs(stops[0]["e"] - 10.0) < 8.0  # offset right of the node

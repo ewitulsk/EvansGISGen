@@ -329,6 +329,13 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
                 h += depth;
             }
         }
+        // An elevated deck is a solid slab — every heightmap type sees it
+        // as the column top, and surface queries must not target the
+        // underpass.
+        int deck = dataset.roadDeckYAt(x, z);
+        if (deck != GeoTile.NO_DATA && deck > h) {
+            h = deck;
+        }
         return h;
     }
 
@@ -559,6 +566,10 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
         // already-decorated neighbors may have grown trees into road or
         // building cells — clear anything that isn't terrain or structure.
         clearCover(chunk);
+        // Street furniture: sign posts from the compiled signs.json
+        // sidecar (Phase 13) — before landmarks so a curated build wins.
+        com.evansgisgen.geoworld.sign.SignPlacer.place(signs(), level, chunk,
+                p -> signGround(chunk, p.getX(), p.getZ()));
         // Curated .nbt landmarks place last, sliced to this chunk's bounds
         // (Phase 9) — nothing else may overwrite them.
         landmarks.placeChunk(level, chunk, GeoChunkGenerator::isFeatureOverhang);
@@ -610,6 +621,49 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
         landmarks(registryAccess, overlay);
     }
 
+    /** Lazily-resolved signs.json sidecar (Phase 13 street furniture). */
+    private volatile com.evansgisgen.geoworld.sign.SignIndex signIndex;
+
+    public com.evansgisgen.geoworld.sign.SignIndex signs() {
+        com.evansgisgen.geoworld.sign.SignIndex index = signIndex;
+        if (index == null) {
+            synchronized (this) {
+                index = signIndex;
+                if (index == null) {
+                    index = dataset.isEmpty()
+                            ? com.evansgisgen.geoworld.sign.SignIndex.EMPTY
+                            : com.evansgisgen.geoworld.sign.SignIndex.load(dataset);
+                    signIndex = index;
+                }
+            }
+        }
+        return index;
+    }
+
+    /**
+     * Ground Y for a sign post — the terrain surface at (x, z), refusing
+     * spots that are water, paved, decked, or inside a footprint.
+     */
+    private int signGround(ChunkAccess chunk, int x, int z) {
+        GeoTile tile = dataset.tileAt(x, z).orElse(null);
+        if (tile != null) {
+            int tlx = dataset.localCoord(x);
+            int tlz = dataset.localCoord(z);
+            // Sidewalk cells are fine — blades stand on the walk. Travel
+            // lanes, water, decks and building cells refuse a post.
+            int rc = tile.roadClass(tlx, tlz);
+            if (tile.waterDepth(tlx, tlz) > 0
+                    || (rc != ROAD_NONE && rc != ROAD_SIDEWALK)
+                    || tile.roadDeckY(tlx, tlz) != GeoTile.NO_DATA
+                    || tile.buildingClass(tlx, tlz) != BUILDING_NONE) {
+                return getMinY();  // unplaceable — skip
+            }
+        }
+        int minY = getMinY();
+        int topY = minY + getGenDepth() - 1;
+        return groundHeight(chunk, new BlockPos.MutableBlockPos(), x, z, minY, topY);
+    }
+
     /**
      * Replaces the top terrain block of classified land-use columns with the
      * class's surface block (Phase 7). Water/road/building columns are
@@ -640,6 +694,7 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
                 }
                 if (tile.waterDepth(tlx, tlz) > 0
                         || tile.roadClass(tlx, tlz) != ROAD_NONE
+                        || tile.roadDeckY(tlx, tlz) != GeoTile.NO_DATA
                         || tile.buildingClass(tlx, tlz) != BUILDING_NONE) {
                     continue;
                 }
@@ -698,6 +753,7 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
                 }
                 if (tile.waterDepth(tlx, tlz) > 0
                         || tile.roadClass(tlx, tlz) != ROAD_NONE
+                        || tile.roadDeckY(tlx, tlz) != GeoTile.NO_DATA
                         || landmarks.suppressesBuildingAt(x, z)) {
                     continue;
                 }
@@ -787,6 +843,7 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
                 }
                 if (tile.waterDepth(tlx, tlz) > 0
                         || tile.roadClass(tlx, tlz) != ROAD_NONE
+                        || tile.roadDeckY(tlx, tlz) != GeoTile.NO_DATA
                         || tile.buildingClass(tlx, tlz) != BUILDING_NONE) {
                     continue;
                 }
@@ -804,6 +861,15 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
         }
     }
 
+    /** Structural under-block of an elevated deck. */
+    private static final BlockState DECK_UNDER = Blocks.SMOOTH_STONE.defaultBlockState();
+    /** Guardrail along elevated deck edges. */
+    private static final BlockState GUARDRAIL = Blocks.STONE_BRICK_WALL.defaultBlockState();
+    /** Support pier material under elevated decks. */
+    private static final BlockState PIER = Blocks.STONE_BRICKS.defaultBlockState();
+    /** Pier spacing lattice (blocks) under elevated decks. */
+    private static final int PIER_SPACING = 8;
+
     /**
      * Replaces the top solid blocks of every compiled road column with the
      * class's surface block. The DEM already holds the pavement elevation,
@@ -811,6 +877,13 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
      * is carved below grade, so instead of skipping the cell we pave a
      * deck one block above the waterline (bed + depth + 1 ≈ road grade):
      * a flat culvert/bridge slab with the water kept underneath.
+     *
+     * <p>Columns carrying a compiled {@code roadz} deck (Phase 13 bridges
+     * and overpasses) additionally render a two-block slab at the deck's
+     * solved height, guardrail walls along deck edges, and pier supports
+     * on a deterministic lattice where the gap below is tall enough. The
+     * space under a deck is left open — underpasses and river water stay
+     * real.
      */
     private void paveRoads(ChunkAccess chunk) {
         if (dataset.isEmpty()) {
@@ -820,7 +893,7 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
         // Chunks never straddle tiles (256 % 16 == 0), so one lookup covers
         // the whole chunk.
         GeoTile tile = dataset.tileAt(chunkPos.getMinBlockX(), chunkPos.getMinBlockZ()).orElse(null);
-        if (tile == null || !tile.hasRoad()) {
+        if (tile == null || (!tile.hasRoad() && !tile.hasRoadDeck())) {
             return;
         }
 
@@ -836,39 +909,50 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
                 int tlx = dataset.localCoord(x);
                 int tlz = dataset.localCoord(z);
                 int road = tile.roadClass(tlx, tlz);
-                if (road == ROAD_NONE) {
-                    continue;
-                }
-                if (tile.waterDepth(tlx, tlz) > 0) {
-                    // Deck one block above the column's actual waterline
-                    // (bed + depth ≈ road grade at full influence; the
-                    // scan stays consistent under blending).
-                    for (int y = topY; y > minY; y--) {
-                        BlockState cur = chunk.getBlockState(pos.set(x, y, z));
-                        if (cur.isAir()) {
-                            continue;
+                int deckY = tile.roadDeckY(tlx, tlz);
+                // At-grade work runs BEFORE the deck lands in this column:
+                // groundHeight would otherwise measure the new slab and
+                // repave over it.
+                if (road != ROAD_NONE) {
+                    if (tile.waterDepth(tlx, tlz) > 0) {
+                        if (deckY == GeoTile.NO_DATA) {
+                            // Deck one block above the column's actual
+                            // waterline (bed + depth ≈ road grade at full
+                            // influence; the scan stays consistent under
+                            // blending). A compiled roadz deck supersedes
+                            // this fallback — no culvert under a real span.
+                            for (int y = topY; y > minY; y--) {
+                                BlockState cur = chunk.getBlockState(pos.set(x, y, z));
+                                if (cur.isAir()) {
+                                    continue;
+                                }
+                                if (!cur.getFluidState().isEmpty()
+                                        && y + 1 <= topY) {
+                                    chunk.setBlockState(pos.set(x, y + 1, z),
+                                                        roadBlock(road), false);
+                                    modified = true;
+                                }
+                                break;
+                            }
                         }
-                        if (!cur.getFluidState().isEmpty()
-                                && y + 1 <= topY) {
-                            chunk.setBlockState(pos.set(x, y + 1, z),
-                                                roadBlock(road), false);
-                            modified = true;
+                    } else {
+                        int surface = groundHeight(chunk, pos, x, z, minY, topY);
+                        if (surface > minY) {
+                            BlockState roadBlock = roadBlock(road);
+                            for (int y = surface; y > surface - 3 && y > minY; y--) {
+                                BlockState cur = chunk.getBlockState(pos.set(x, y, z));
+                                if (!cur.isAir() && cur.getFluidState().isEmpty()
+                                        && cur != roadBlock) {
+                                    chunk.setBlockState(pos.set(x, y, z), roadBlock, false);
+                                    modified = true;
+                                }
+                            }
                         }
-                        break;
                     }
-                    continue;
                 }
-                int surface = groundHeight(chunk, pos, x, z, minY, topY);
-                if (surface <= minY) {
-                    continue;
-                }
-                BlockState roadBlock = roadBlock(road);
-                for (int y = surface; y > surface - 3 && y > minY; y--) {
-                    BlockState cur = chunk.getBlockState(pos.set(x, y, z));
-                    if (!cur.isAir() && cur.getFluidState().isEmpty() && cur != roadBlock) {
-                        chunk.setBlockState(pos.set(x, y, z), roadBlock, false);
-                        modified = true;
-                    }
+                if (deckY != GeoTile.NO_DATA) {
+                    modified |= paveDeck(chunk, pos, x, z, deckY,
+                            tile.roadDeckClass(tlx, tlz), minY, topY);
                 }
             }
         }
@@ -876,6 +960,38 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
         if (modified) {
             Heightmap.primeHeightmaps(chunk, EnumSet.allOf(Heightmap.Types.class));
         }
+    }
+
+    /**
+     * Renders one elevated deck column: surface block at {@code deckY},
+     * structural under-block beneath it, a guardrail where a 4-neighbour
+     * lacks a deck (the deck edge), and a pier on a regular lattice where
+     * the gap to the ground is at least three blocks. Returns true when
+     * the column was modified.
+     */
+    private boolean paveDeck(ChunkAccess chunk, BlockPos.MutableBlockPos pos,
+            int x, int z, int deckY, int deckClass, int minY, int topY) {
+        int ground = groundHeight(chunk, pos, x, z, minY, topY);
+        if (deckY <= ground + 1 || deckY > topY) {
+            return false;  // deck resolved to grade — nothing to float
+        }
+        BlockState surface = roadBlock(deckClass != ROAD_NONE ? deckClass : ROAD_ASPHALT);
+        chunk.setBlockState(pos.set(x, deckY, z), surface, false);
+        chunk.setBlockState(pos.set(x, deckY - 1, z), DECK_UNDER, false);
+        if (deckY + 1 <= topY && (dataset.roadDeckYAt(x + 1, z) == GeoTile.NO_DATA
+                || dataset.roadDeckYAt(x - 1, z) == GeoTile.NO_DATA
+                || dataset.roadDeckYAt(x, z + 1) == GeoTile.NO_DATA
+                || dataset.roadDeckYAt(x, z - 1) == GeoTile.NO_DATA)) {
+            chunk.setBlockState(pos.set(x, deckY + 1, z), GUARDRAIL, false);
+        }
+        if (deckY - ground >= 3
+                && Math.floorMod(x, PIER_SPACING) == 0
+                && Math.floorMod(z, PIER_SPACING) == 0) {
+            for (int y = ground + 1; y < deckY - 1; y++) {
+                chunk.setBlockState(pos.set(x, y, z), PIER, false);
+            }
+        }
+        return true;
     }
 
     /**
@@ -892,7 +1008,8 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
         }
         ChunkPos chunkPos = chunk.getPos();
         GeoTile tile = dataset.tileAt(chunkPos.getMinBlockX(), chunkPos.getMinBlockZ()).orElse(null);
-        if (tile == null || (!tile.hasRoad() && !tile.hasBuilding())) {
+        if (tile == null || (!tile.hasRoad() && !tile.hasBuilding()
+                && !tile.hasRoadDeck())) {
             return;
         }
 
@@ -907,6 +1024,19 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
                 int z = chunkPos.getBlockZ(lz);
                 int tlx = dataset.localCoord(x);
                 int tlz = dataset.localCoord(z);
+                int deckY = tile.roadDeckY(tlx, tlz);
+                if (deckY != GeoTile.NO_DATA) {
+                    // Elevated deck: only cover above the slab is cleared —
+                    // the underpass (and its trees) stays intact.
+                    for (int y = deckY + 1; y <= topY; y++) {
+                        BlockState cur = chunk.getBlockState(pos.set(x, y, z));
+                        if (isFeatureOverhang(cur)) {
+                            chunk.setBlockState(pos.set(x, y, z), AIR, false);
+                            modified = true;
+                        }
+                    }
+                    continue;
+                }
                 if (tile.waterDepth(tlx, tlz) > 0) {
                     // Wet road cells carry a deck — clear any bank-side
                     // canopy overhanging it. Other wet cells are left alone.
@@ -1100,6 +1230,20 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
                         }
                     }
                 }
+            }
+        }
+        // A compiled elevated deck reports its slab + under-block at the
+        // solved height (same writes paveDeck performs at decoration).
+        if (roadTile != null && roadTile.hasRoadDeck()) {
+            int deckY = roadTile.roadDeckY(dataset.localCoord(x),
+                    dataset.localCoord(z));
+            if (deckY != GeoTile.NO_DATA && deckY - 1 > minY && deckY <= topY) {
+                int cls = roadTile.roadDeckClass(dataset.localCoord(x),
+                        dataset.localCoord(z));
+                shifted[deckY - minY] =
+                        roadBlock(cls != ROAD_NONE ? cls : ROAD_ASPHALT);
+                shifted[deckY - 1 - minY] = DECK_UNDER;
+                changed = true;
             }
         }
         return changed ? new NoiseColumn(minY, shifted) : column;

@@ -13,7 +13,7 @@ dataset). See [PLAN.md](PLAN.md) for the full implementation plan.
 └── format/     # dataset format spec
 ```
 
-## Current status: Phase 12
+## Current status: Phase 13
 
 - `GeoChunkGenerator` wraps a vanilla `ChunkGenerator` (`geoworld:geoworld`)
   and delegates everything to it, then deforms terrain from geographic data:
@@ -63,6 +63,21 @@ dataset). See [PLAN.md](PLAN.md) for the full implementation plan.
   water, the cell becomes a deck: a road slab one block above the waterline
   (bed + depth + 1 ≈ road grade) with the channel kept underneath, mirrored
   in `getBaseColumn`/height queries.
+- Bridges & signs (Phase 13): `fetch-roads` now also pulls
+  `highway=stop/give_way/traffic_signals` nodes, and `roads.py` keeps each
+  way's `bridge`/`tunnel`/`layer`/`name`/`ref` tags plus the `*_link` ramp
+  classes (motorway_link ramps were previously dropped). For bridge ways the
+  compiler solves a deck-height profile — `max(DEM, under-feature surface +
+  clearance)` over lower roads, rail and water, relaxed by an ~8% slope
+  envelope so decks rise on approaches and land at grade — and emits two
+  new tile layers: `roadz` (deck top block-Y) and `roade` (deck class).
+  The runtime renders a two-block slab at the solved height with guardrail
+  walls on deck edges and stone-brick piers on an 8 m lattice where the gap
+  clears 3 m; under-roads keep their own paving, and surface/building/
+  forest passes skip deck columns so nothing grows under a span. A
+  `signs.json` sidecar carries street-name blades at named-way
+  intersections plus stop/yield posts; `SignIndex` plants them on fence
+  posts during decoration with the compiled facing rotation.
 - Land use (Phase 7): `fetch-landuse` pulls OSM `landuse`/`leisure`/
   `natural`/`railway`/`aeroway` polygons; `landuse.py` rasterizes them into
   a per-cell surface class (`0x04` layer: residential, farmland, forest,

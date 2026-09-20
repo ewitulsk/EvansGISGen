@@ -30,6 +30,8 @@ LAYER_BITS = {
     "water_depth": 0x20, # u8[TILE^2]   water depth in blocks (0 = dry)
     "building": 0x40,    # u8[TILE^2]   building class ids (0 = none)
     "building_levels": 0x80,  # u8[TILE^2] floor count inside footprints
+    "roadz": 0x100,      # i16[TILE^2]  elevated deck top Y (NODATA = none)
+    "roade": 0x200,      # u8[TILE^2]   elevated deck cross-section class
 }
 _LAYER_ORDER = sorted(LAYER_BITS, key=LAYER_BITS.get)
 

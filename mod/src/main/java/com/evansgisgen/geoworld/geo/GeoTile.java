@@ -33,6 +33,8 @@ public final class GeoTile {
     static final int LAYER_WATER_DEPTH = 0x20;
     static final int LAYER_BUILDING = 0x40;
     static final int LAYER_BUILDING_LEVELS = 0x80;
+    static final int LAYER_ROADZ = 0x100;
+    static final int LAYER_ROADE = 0x200;
 
     private final int tileX;
     private final int tileZ;
@@ -45,11 +47,14 @@ public final class GeoTile {
     @Nullable private final byte[] waterDepth;
     @Nullable private final byte[] building;
     @Nullable private final byte[] buildingLevels;
+    @Nullable private final short[] roadDeck;
+    @Nullable private final byte[] roadDeckClass;
 
     private GeoTile(int tileX, int tileZ, int tileSize, @Nullable short[] elevation,
             @Nullable byte[] influence, @Nullable byte[] surface, @Nullable byte[] road,
             @Nullable byte[] waterBits, @Nullable byte[] waterDepth,
-            @Nullable byte[] building, @Nullable byte[] buildingLevels) {
+            @Nullable byte[] building, @Nullable byte[] buildingLevels,
+            @Nullable short[] roadDeck, @Nullable byte[] roadDeckClass) {
         this.tileX = tileX;
         this.tileZ = tileZ;
         this.tileSize = tileSize;
@@ -61,6 +66,8 @@ public final class GeoTile {
         this.waterDepth = waterDepth;
         this.building = building;
         this.buildingLevels = buildingLevels;
+        this.roadDeck = roadDeck;
+        this.roadDeckClass = roadDeckClass;
     }
 
     public static GeoTile read(Path file, int tileSize) throws IOException {
@@ -89,8 +96,10 @@ public final class GeoTile {
         byte[] waterDepth = null;
         byte[] building = null;
         byte[] buildingLevels = null;
+        short[] roadDeck = null;
+        byte[] roadDeckClass = null;
 
-        for (int bit = 1; bit <= 0x80; bit <<= 1) {
+        for (int bit = 1; bit <= 0x200; bit <<= 1) {
             if ((mask & bit) == 0) {
                 continue;
             }
@@ -112,11 +121,16 @@ public final class GeoTile {
                 case LAYER_WATER_DEPTH -> waterDepth = payload;
                 case LAYER_BUILDING -> building = payload;
                 case LAYER_BUILDING_LEVELS -> buildingLevels = payload;
+                case LAYER_ROADZ -> {
+                    roadDeck = new short[rawLen / 2];
+                    ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN).asShortBuffer().get(roadDeck);
+                }
+                case LAYER_ROADE -> roadDeckClass = payload;
                 default -> { /* unknown bit, already skipped by mask check */ }
             }
         }
         return new GeoTile(tileX, tileZ, tileSize, elevation, influence, surface, road,
-                water, waterDepth, building, buildingLevels);
+                water, waterDepth, building, buildingLevels, roadDeck, roadDeckClass);
     }
 
     private static byte[] decompress(int codec, byte[] stored, int rawLen) throws IOException {
@@ -232,5 +246,23 @@ public final class GeoTile {
     /** Floor count for this column (0 outside footprints). */
     public int buildingLevels(int localX, int localZ) {
         return buildingLevels == null ? 0 : buildingLevels[idx(localX, localZ)] & 0xFF;
+    }
+
+    public boolean hasRoadDeck() {
+        return roadDeck != null;
+    }
+
+    /**
+     * Elevated deck top block-Y for this column (NO_DATA = no deck). The
+     * compiler emits a deck only where a bridge way resolves above the
+     * bare-earth DEM — embanked ramps stay terrain.
+     */
+    public int roadDeckY(int localX, int localZ) {
+        return roadDeck == null ? NO_DATA : roadDeck[idx(localX, localZ)];
+    }
+
+    /** Cross-section class of the elevated deck (0 = none). */
+    public int roadDeckClass(int localX, int localZ) {
+        return roadDeckClass == null ? 0 : roadDeckClass[idx(localX, localZ)] & 0xFF;
     }
 }

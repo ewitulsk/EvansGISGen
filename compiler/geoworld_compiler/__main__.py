@@ -9,6 +9,7 @@ Commands:
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -347,8 +348,17 @@ def main(argv: list[str] | None = None) -> int:
                 from .hydro import HydroSource
                 hydro = HydroSource(args.hydro, projection, bounds=sb)
             if args.roads:
-                from .roads import RoadSource
-                roads = RoadSource(args.roads, projection, bounds=sb)
+                from .roads import RoadSource, parse_rail_lines
+                # Deck solving needs the bare-earth DEM (bridge floors),
+                # water depths (river crossings) and rail centerlines
+                # (under-features mined from the landuse fetch).
+                rail = (parse_rail_lines(
+                            json.loads(Path(args.landuse).read_text()),
+                            projection)
+                        if args.landuse else None)
+                roads = RoadSource(args.roads, projection, bounds=sb,
+                                   elev_m=getattr(source, "elevation_m", None),
+                                   hydro=hydro, rail_lines=rail)
             if args.landuse:
                 from .landuse import LanduseSource
                 landuse = LanduseSource(args.landuse, projection, bounds=sb)

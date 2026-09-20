@@ -21,19 +21,21 @@ python -m geoworld_compiler build --out ../datasets/synthetic.geoworld \
     --datum-elevation 381 --base-elevation 381 \
     --radius-full 800 --radius-edge 1400
 
-# Real build: DEM + all GIS layers + the US-77 corridor.
+# Real build: DEM + all GIS layers + the US-77 corridor + Lincoln.
 # --bounds is the dataset rect in geo meters (default +-radius square);
-# --corridor adds a CorridorRamp strip along motorway/trunk ways in --roads.
+# --corridor adds a CorridorRamp strip along motorway/trunk ways in --roads;
+# --region adds extra claimed rects (Lincoln metro) composited by max.
 python -m geoworld_compiler build --source dem \
-    --dem ../datasets/raw/USGS_1M_14_*.tif \
+    --dem ../datasets/raw/USGS_1M_*.tif ../datasets/raw/USGS_one_meter_*.tif \
     --anchor 40.2681,-96.7470 --crs EPSG:32614 \
     --radius 4000 --ramp 600 \
-    --bounds "-4600,-7300,4600,23800" --corridor \
-    --hydro ../datasets/raw/water_corridor.json \
-    --roads ../datasets/raw/roads_corridor.json \
-    --landuse ../datasets/raw/landuse_corridor.json \
-    --buildings ../datasets/raw/buildings_corridor.json \
-    --ms-buildings ../datasets/raw/buildings_ms_corridor.json \
+    --bounds "-4600,-7300,12544,70400" --corridor \
+    --region "-5500,52400,12000,69200" \
+    --hydro ../datasets/raw/water_all.json \
+    --roads ../datasets/raw/roads_all.json \
+    --landuse ../datasets/raw/landuse_all.json \
+    --buildings ../datasets/raw/buildings_all.json \
+    --ms-buildings ../datasets/raw/buildings_ms_all.json \
     --out ../datasets/beatrice.geoworld --name beatrice
 
 # Data fetches (all take --bbox 'minLon,minLat,maxLon,maxLat')

@@ -28,14 +28,16 @@
     "water",
     "water_depth",
     "road",
+    "roadz",
+    "roade",
     "building",
     "building_levels"
   ],
-  "tile_count": 9470,
+  "tile_count": 9618,
   "bounds": {
-    "min_tile_x": -19,
+    "min_tile_x": -21,
     "max_tile_x": 48,
-    "min_tile_z": -274,
+    "min_tile_z": -275,
     "max_tile_z": 37
   }
 }

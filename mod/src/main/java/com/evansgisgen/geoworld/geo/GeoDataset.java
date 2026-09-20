@@ -200,6 +200,19 @@ public final class GeoDataset {
         return tile == null ? 0 : tile.buildingLevels(localCoord(x), localCoord(z));
     }
 
+    /** Elevated road-deck top block-Y at (x, z); NO_DATA = no deck. */
+    public int roadDeckYAt(int x, int z) {
+        GeoTile tile = tileAt(x, z).orElse(null);
+        return tile == null || !tile.hasRoadDeck()
+                ? GeoTile.NO_DATA : tile.roadDeckY(localCoord(x), localCoord(z));
+    }
+
+    /** Elevated deck cross-section class at (x, z); 0 = none. */
+    public int roadDeckClassAt(int x, int z) {
+        GeoTile tile = tileAt(x, z).orElse(null);
+        return tile == null ? 0 : tile.roadDeckClass(localCoord(x), localCoord(z));
+    }
+
     private Optional<GeoTile> loadTile(long key) {
         int tx = (int) (key >> 32);
         int tz = (int) (long) key;

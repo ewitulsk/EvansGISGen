@@ -31,6 +31,8 @@ class Roads(Protocol):
     """Road surface-class provider in geo space (see roads.py)."""
 
     def road_class(self, east: float, north: float) -> int: ...
+    def deck_m(self, east: float, north: float) -> float: ...
+    def deck_class(self, east: float, north: float) -> int: ...
 
 
 class Landuse(Protocol):
@@ -77,6 +79,7 @@ def build_dataset(
     written: list[tuple[int, int]] = []
     any_water = False
     any_road = False
+    any_deck = False
     any_surface = False
     any_building = False
     n = TILE_SIZE * TILE_SIZE
@@ -97,11 +100,14 @@ def build_dataset(
             surface = bytearray(n)
             water_depth = bytearray(n)
             road = bytearray(n)
+            roadz = [NODATA] * n
+            roade = bytearray(n)
             building = bytearray(n)
             b_levels = bytearray(n)
             any_influence = False
             any_tile_water = False
             any_tile_road = False
+            any_tile_deck = False
             any_tile_surface = False
             any_tile_building = False
             for lz in range(TILE_SIZE):
@@ -137,6 +143,11 @@ def build_dataset(
                         if rc:
                             road[i] = rc
                             any_tile_road = True
+                        dm = roads.deck_m(east, north)
+                        if dm > 0.0:
+                            roadz[i] = transform.block_y(dm)
+                            roade[i] = roads.deck_class(east, north)
+                            any_tile_deck = True
                     if landuse is not None:
                         sc = landuse.surface_class(east, north)
                         if sc:
@@ -160,6 +171,9 @@ def build_dataset(
                     layers["water_depth"] = bytes(water_depth)
                 if any_tile_road:
                     layers["road"] = bytes(road)
+                if any_tile_deck:
+                    layers["roadz"] = pack_elevation(roadz)
+                    layers["roade"] = bytes(roade)
                 if any_tile_building:
                     layers["building"] = bytes(building)
                     layers["building_levels"] = bytes(b_levels)
@@ -167,6 +181,7 @@ def build_dataset(
                 written.append((tx, tz))
                 any_water = any_water or any_tile_water
                 any_road = any_road or any_tile_road
+                any_deck = any_deck or any_tile_deck
                 any_surface = any_surface or any_tile_surface
                 any_building = any_building or any_tile_building
             print(f"  tile {tx:+d},{tz:+d}: {'written' if any_influence else 'skipped'}",
@@ -176,7 +191,15 @@ def build_dataset(
               + (["surface"] if any_surface else [])
               + (["water", "water_depth"] if any_water else [])
               + (["road"] if any_road else [])
+              + (["roadz", "roade"] if any_deck else [])
               + (["building", "building_levels"] if any_building else []))
     write_manifest(out, name=name, transform=transform, projection=projection,
                    layers=layers, tiles=written)
+    # Street furniture sidecar: sign placements mined from the road ways
+    # (intersection blades + stop/yield nodes) for the runtime SignIndex.
+    signs = getattr(roads, "signs", None) if roads is not None else None
+    if signs:
+        import json
+        (out / "signs.json").write_text(json.dumps({"signs": signs}))
+        print(f"signs: {len(signs)} placements")
     return out

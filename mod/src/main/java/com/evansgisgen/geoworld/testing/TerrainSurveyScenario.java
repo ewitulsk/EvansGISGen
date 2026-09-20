@@ -65,6 +65,9 @@ public final class TerrainSurveyScenario {
             // Corridor towns + Lincoln (Phase 10/11): Princeton ~34 km and
             // downtown Lincoln ~60 km north of the Beatrice anchor.
             {2716, -34307}, {2196, -60655}, {2474, -60052},
+            // Elevated decks (Phase 13): the I-180/US-34 viaduct west of
+            // Memorial Stadium and the Haymarket-area overpasses.
+            {1570, -61430}, {1632, -60650}, {1550, -60638}, {1444, -60188},
             {5000, 0}, {-5000, -5000},
     };
 
@@ -103,7 +106,8 @@ public final class TerrainSurveyScenario {
                                 int surfaceClass, int buildingClass,
                                 int buildingLevels, String biome, boolean landmark,
                                 int vanilla, int expected, List<String> topBlocks,
-                                boolean sealedOverburden, int validStarts) {}
+                                boolean sealedOverburden, int validStarts,
+                                int deckY, int deckClass) {}
 
     private void run(MinecraftServer server) {
         ServerLevel level = server.overworld();
@@ -164,8 +168,9 @@ public final class TerrainSurveyScenario {
             // count the water column, so measure the bed with OCEAN_FLOOR.
             // Building shells legitimately rise above terrain — covered by
             // building_shell_* instead. Landmark columns place templates —
-            // covered by landmark_demo_house.
-            if (r.buildingClass > 0 || r.landmark) {
+            // covered by landmark_demo_house. Deck columns carry the solved
+            // overpass height, not the DEM — covered by elevated_deck_*.
+            if (r.buildingClass > 0 || r.landmark || r.deckY != GeoTile.NO_DATA) {
                 continue;
             }
             int measured = r.waterDepth > 0 ? r.oceanY : r.terrainY;
@@ -189,7 +194,8 @@ public final class TerrainSurveyScenario {
         // motion-blocking heightmap reports the water top, not the bed).
         for (ColumnReport r : reports) {
             if (r.expected != GeoTile.NO_DATA && r.waterDepth == 0
-                    && r.buildingClass == 0 && !r.landmark) {
+                    && r.buildingClass == 0 && !r.landmark
+                    && r.deckY == GeoTile.NO_DATA) {
                 pass &= check(String.format("blend_matches_field_%d_%d", r.x, r.z),
                         Math.abs(r.terrainY - r.expected) <= 12);
             }
@@ -198,7 +204,7 @@ public final class TerrainSurveyScenario {
         // surface at bed + depth (<= 1 block of rounding slack).
         for (ColumnReport r : reports) {
             if (r.waterDepth > 0 && r.weight >= 0.98 && delegate != null
-                    && r.roadClass == 0) {
+                    && r.roadClass == 0 && r.deckY == GeoTile.NO_DATA) {
                 pass &= check(String.format("water_surface_%d_%d", r.x, r.z),
                         (r.top.is(Blocks.WATER) || r.top.is(Blocks.ICE))
                                 && Math.abs(r.topY - (r.target + r.waterDepth)) <= 1);
@@ -208,7 +214,7 @@ public final class TerrainSurveyScenario {
         // block one block above the waterline, with water kept below it.
         for (ColumnReport r : reports) {
             if (r.waterDepth > 0 && r.roadClass > 0 && r.weight >= 0.98
-                    && delegate != null) {
+                    && delegate != null && r.deckY == GeoTile.NO_DATA) {
                 BlockState roadBlock =
                         com.evansgisgen.geoworld.worldgen.GeoChunkGenerator
                                 .roadBlock(r.roadClass);
@@ -220,9 +226,11 @@ public final class TerrainSurveyScenario {
             }
         }
         // Phase 6: compiled road columns render the class's surface block
-        // (asphalt, curb, sidewalk, ...).
+        // (asphalt, curb, sidewalk, ...). Deck columns are covered by
+        // elevated_deck_* — the under-road keeps its own paving.
         for (ColumnReport r : reports) {
-            if (r.roadClass > 0 && r.weight >= 0.98 && delegate != null) {
+            if (r.roadClass > 0 && r.weight >= 0.98 && delegate != null
+                    && r.deckY == GeoTile.NO_DATA) {
                 pass &= check(String.format("road_surface_%d_%d", r.x, r.z),
                         r.top == com.evansgisgen.geoworld.worldgen.GeoChunkGenerator
                                 .roadBlock(r.roadClass));
@@ -234,7 +242,8 @@ public final class TerrainSurveyScenario {
         for (ColumnReport r : reports) {
             if (r.surfaceClass > 0 && r.weight >= 0.98 && delegate != null
                     && r.waterDepth == 0 && r.roadClass == 0
-                    && r.buildingClass == 0 && !r.landmark) {
+                    && r.buildingClass == 0 && !r.landmark
+                    && r.deckY == GeoTile.NO_DATA) {
                 BlockState expectedBlock =
                         com.evansgisgen.geoworld.worldgen.GeoChunkGenerator
                                 .surfaceBlock(r.surfaceClass);
@@ -261,7 +270,8 @@ public final class TerrainSurveyScenario {
         // storey above terrain and is a palette block (roof/wall/window).
         for (ColumnReport r : reports) {
             if (r.buildingClass > 0 && r.weight >= 0.98 && delegate != null
-                    && r.waterDepth == 0 && r.roadClass == 0 && !r.landmark) {
+                    && r.waterDepth == 0 && r.roadClass == 0 && !r.landmark
+                    && r.deckY == GeoTile.NO_DATA) {
                 var palette = com.evansgisgen.geoworld.worldgen.GeoChunkGenerator
                         .buildingPalette(r.buildingClass);
                 pass &= check(String.format("building_shell_%d_%d", r.x, r.z),
@@ -274,9 +284,11 @@ public final class TerrainSurveyScenario {
         // for the 16 m under the deformed surface (bed, on wet columns) —
         // caves still exist deeper, they just can't breach roads/ground.
         // Building shells have interior air; landmarks own their columns.
+        // Deck columns carry air between ground and slab by design.
         for (ColumnReport r : reports) {
             if (r.weight >= 0.98 && delegate != null
-                    && r.buildingClass == 0 && !r.landmark) {
+                    && r.buildingClass == 0 && !r.landmark
+                    && r.deckY == GeoTile.NO_DATA) {
                 pass &= check(String.format("no_cave_breach_%d_%d", r.x, r.z),
                         r.sealedOverburden);
             }
@@ -287,6 +299,74 @@ public final class TerrainSurveyScenario {
             if (r.weight >= 0.98 && delegate != null) {
                 pass &= check(String.format("no_structures_%d_%d", r.x, r.z),
                         r.validStarts == 0);
+            }
+        }
+        // Phase 13: elevated decks render the deck class's slab at the
+        // solved overpass height, with open air underneath down to the
+        // ground (or the lower road) — not projected onto the terrain.
+        for (ColumnReport r : reports) {
+            if (r.deckY != GeoTile.NO_DATA && r.weight >= 0.98
+                    && delegate != null) {
+                BlockState deckBlock =
+                        com.evansgisgen.geoworld.worldgen.GeoChunkGenerator
+                                .roadBlock(r.deckClass);
+                BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+                boolean slab = level.getBlockState(pos.set(r.x, r.deckY, r.z))
+                        == deckBlock;
+                // Open span: nothing solid in the 3 m under the deck's
+                // structural under-block at deckY-1 (supports sit under
+                // deck edges, not mid-span cells).
+                boolean clear = true;
+                for (int y = r.deckY - 2; y >= r.deckY - 4 && clear; y--) {
+                    clear = level.getBlockState(pos.set(r.x, y, r.z)).isAir()
+                            || !level.getBlockState(pos.set(r.x, y, r.z))
+                                    .getFluidState().isEmpty();
+                }
+                pass &= check(String.format("elevated_deck_%d_%d", r.x, r.z),
+                        slab && clear && r.deckY > r.target + 2);
+            }
+        }
+        // Phase 13: signs — the compiled sidecar must carry entries and a
+        // generated sign block must sit on a pole with its text.
+        {
+            com.evansgisgen.geoworld.sign.SignIndex signs =
+                    gen instanceof com.evansgisgen.geoworld.worldgen
+                            .GeoChunkGenerator geoGen
+                            ? geoGen.signs()
+                            : com.evansgisgen.geoworld.sign.SignIndex.EMPTY;
+            pass &= check("signs_loaded", signs.size() > 0);
+            var any = signs.nearest(2196, -60655, 4000);
+            pass &= check("sign_found_near_lincoln", any.isPresent());
+            if (any.isPresent()) {
+                var sign = any.get();
+                int sx = sign.x();
+                int sz = sign.z();
+                for (int dx = -1; dx <= 1; dx++) {
+                    for (int dz = -1; dz <= 1; dz++) {
+                        level.getChunk((sx >> 4) + dx, (sz >> 4) + dz);
+                    }
+                }
+                BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+                int gy = dataset.elevationAt(sx, sz);
+                boolean found = false;
+                boolean hasText = false;
+                if (gy != GeoTile.NO_DATA) {
+                    for (int y = gy; y <= gy + 4 && !found; y++) {
+                        BlockState s = level.getBlockState(pos.set(sx, y, sz));
+                        if (s.getBlock() instanceof net.minecraft.world.level
+                                .block.SignBlock) {
+                            found = true;
+                            var be = level.getBlockEntity(pos);
+                            if (be instanceof net.minecraft.world.level
+                                    .block.entity.SignBlockEntity signBe) {
+                                hasText = signBe.getFrontText()
+                                        .getMessage(0, false)
+                                        .getString().length() > 0;
+                            }
+                        }
+                    }
+                }
+                pass &= check("sign_placed_with_text", found && hasText);
             }
         }
         // Phase 9: the demo landmark placed at (200, 60) — anchor [5,0,0]
@@ -453,6 +533,8 @@ public final class TerrainSurveyScenario {
         int surfaceClass = 0;
         int buildingClass = 0;
         int buildingLevels = 0;
+        int deckY = GeoTile.NO_DATA;
+        int deckClass = 0;
         GeoTile tile = dataset.tileAt(x, z).orElse(null);
         if (tile != null && tile.hasElevation()) {
             int lx = dataset.localCoord(x);
@@ -466,6 +548,8 @@ public final class TerrainSurveyScenario {
             surfaceClass = tile.surfaceClass(lx, lz);
             buildingClass = tile.buildingClass(lx, lz);
             buildingLevels = tile.buildingLevels(lx, lz);
+            deckY = tile.roadDeckY(lx, lz);
+            deckClass = tile.roadDeckClass(lx, lz);
         }
 
         int vanilla = GeoTile.NO_DATA;
@@ -503,15 +587,15 @@ public final class TerrainSurveyScenario {
             }
         }
 
-        LOGGER.info("GEOWORLD-SURVEY x={} z={} topY={} ground={} ocean={} terrain={} top={} waterInTop24={} target={} w={} wd={} road={} surf={} bldg={}/{} biome={} vanilla={} expected={} sealed={} starts={} blocks={}",
+        LOGGER.info("GEOWORLD-SURVEY x={} z={} topY={} ground={} ocean={} terrain={} top={} waterInTop24={} target={} w={} wd={} road={} surf={} bldg={}/{} biome={} vanilla={} expected={} sealed={} starts={} blocks={} deckY={} deckCls={}",
                 x, z, topY, groundY, oceanY, terrainY, top.getBlock(), waterInTop24, target,
                 String.format("%.2f", weight), waterDepth, roadClass, surfaceClass,
                 buildingClass, buildingLevels, biome, vanilla, expected,
-                sealedOverburden, validStarts, topBlocks);
+                sealedOverburden, validStarts, topBlocks, deckY, deckClass);
         return new ColumnReport(x, z, topY, groundY, oceanY, terrainY, terrainBlock,
                 top, waterInTop24, target, weight, waterDepth, roadClass,
                 surfaceClass, buildingClass, buildingLevels, biome,
                 landmarkIndex.contains(x, z), vanilla, expected, topBlocks,
-                sealedOverburden, validStarts);
+                sealedOverburden, validStarts, deckY, deckClass);
     }
 }

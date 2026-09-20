@@ -86,6 +86,8 @@ then one section per set mask bit, in ascending bit order:
 | 0x20 | water_depth | `u8[65536]` water depth in blocks (0 = dry) |
 | 0x40 | building  | `u8[65536]` building class ids (Phase 8)  |
 | 0x80 | building_levels | `u8[65536]` floor count in footprints |
+| 0x100 | roadz    | `i16[65536]` elevated deck top block Y (Phase 13) |
+| 0x200 | roade    | `u8[65536]` deck cross-section class (Phase 13) |
 
 Bitset packing: bit `i` is bit `i % 8` (LSB-first) of byte `i / 8`.
 
@@ -115,6 +117,19 @@ Notes:
   (the compiler bakes the riverbed into the elevation layer), and the runtime
   fills `bed+1 .. bed+depth` with water — so the water surface lands at
   `bed + depth`, which is the DEM's water-surface elevation.
+- `roadz`/`roade` (Phase 13): elevated road decks — bridges and layer>0
+  overpasses. `roadz` holds the deck's top block Y per column (NODATA where
+  no deck), `roade` the deck's cross-section class (same ids as `road`,
+  except shoulders render as pavement). Deck heights are solved offline from
+  OSM `bridge`/`layer` tags, under-feature clearance (lower roads, rail,
+  water), and a slope-limited grade envelope — the runtime just places a
+  two-block slab at `roadz` and leaves the space below open. Ground roads
+  under a deck keep their `road` classification.
+- `signs.json` (Phase 13): optional sidecar beside `manifest.json` —
+  `{"signs": [{"e","n","type","lines","rot"}, ...]}` in geo meters.
+  `type` is `street_name` (intersection blades), `stop`, or `yield`; `rot`
+  is the precomputed `ROTATION_16` facing. Sparse point data, so it lives
+  outside the tile grid.
 - Unknown mask bits should be skipped by readers after parsing their section
   header (forward compatibility). Sections always appear in ascending bit
   order.

@@ -18,6 +18,8 @@ class TileIoTest(unittest.TestCase):
             "surface": bytes(i % 17 for i in range(n)),
             "road": bytes(i % 9 for i in range(n)),
             "water": pack_bitset([i % 3 == 0 for i in range(n)]),
+            "roadz": pack_elevation([(i * 11) % 800 - 400 for i in range(n)]),
+            "roade": bytes(i % 8 for i in range(n)),
         }
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "+0000_-0001.gwt"
@@ -53,6 +55,12 @@ class TileIoTest(unittest.TestCase):
         self.assertEqual(0, water[1])
         self.assertEqual(0, water[2])
         self.assertEqual(1, water[3])
+        deck = struct.unpack(f">{TILE_SIZE * TILE_SIZE}h", layers["roadz"])
+        self.assertEqual(-32768, deck[0])   # i % 5 == 0 -> NODATA
+        self.assertEqual(-149, deck[1])     # (1 % 400) - 150
+        self.assertEqual(99, deck[249])
+        self.assertEqual(1, layers["roade"][1])
+        self.assertEqual(7, layers["roade"][7])
 
     def test_bitset_roundtrip(self):
         n = TILE_SIZE * TILE_SIZE
