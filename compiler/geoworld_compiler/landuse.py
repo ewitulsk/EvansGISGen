@@ -30,6 +30,8 @@ from affine import Affine
 from rasterio.features import rasterize
 from scipy.ndimage import distance_transform_edt
 
+from .banded import BandedGrid, geom_bbox, select
+
 from .transform import Projection
 
 OVERPASS = "https://overpass-api.de/api/interpreter"
@@ -131,8 +133,9 @@ class LanduseSource:
                                  0.0, -resolution_m, n1)
 
         # Group by (class, priority): one rasterize per distinct class.
-        polys: dict[tuple[int, int], list[dict]] = {}
-        rail_lines: list[dict] = []
+        # (bbox, geom) pairs let each band pre-filter to visible features.
+        polys: dict[tuple[int, int], list[tuple[tuple, dict]]] = {}
+        rail_lines: list[tuple[tuple, dict]] = []
         for el in data.get("elements", []):
             if el.get("type") != "way":
                 continue
@@ -142,7 +145,8 @@ class LanduseSource:
                 continue
             coords = [projection.to_geo(p["lat"], p["lon"]) for p in geom]
             if tags.get("railway") == "rail":
-                rail_lines.append({"type": "LineString", "coordinates": coords})
+                g = {"type": "LineString", "coordinates": coords}
+                rail_lines.append((geom_bbox(g), g))
                 continue
             hit = _classify(tags)
             if hit is None:
@@ -151,26 +155,37 @@ class LanduseSource:
                 continue  # need a closed ring
             if coords[0] != coords[-1]:
                 coords.append(coords[0])
-            polys.setdefault(hit, []).append(
-                {"type": "Polygon", "coordinates": [coords]})
+            g = {"type": "Polygon", "coordinates": [coords]}
+            polys.setdefault(hit, []).append((geom_bbox(g), g))
 
-        surface = np.zeros(self._shape, dtype=np.uint8)
-        for (cls, _prio), geoms in sorted(polys.items(), key=lambda kv: kv[0][1]):
-            mask = rasterize([(g, 1) for g in geoms],
-                             out_shape=self._shape, transform=self._transform,
-                             fill=0, all_touched=True, dtype=np.uint8)
-            surface[mask.astype(bool)] = cls
-
-        # Rail corridors: distance-to-track <= ballast half-width.
-        if rail_lines:
-            center = rasterize([(g, 1) for g in rail_lines],
-                               out_shape=self._shape, transform=self._transform,
-                               fill=0, all_touched=True, dtype=np.uint8).astype(bool)
-            if center.any():
-                dc = distance_transform_edt(~center, sampling=resolution_m)
-                surface[dc <= RAIL_HALF_WIDTH_M] = SURFACE_RAILWAY
-
+        surface = BandedGrid(bounds, resolution_m, np.uint8)
         self._surface = surface
+        # Context must cover the rail buffer reach (RAIL_HALF_WIDTH_M).
+        for r0, r1, w0, w1, wt in surface.band_windows(margin_m=32.0):
+            win = np.zeros((w1 - w0, surface.width), dtype=np.uint8)
+            wrect = surface.window_rect(w0, w1)
+            for (cls, _prio), pairs in sorted(polys.items(),
+                                              key=lambda kv: kv[0][1]):
+                geoms = select(pairs, wrect)
+                if not geoms:
+                    continue
+                mask = rasterize([(g, 1) for g in geoms],
+                                 out_shape=win.shape, transform=wt,
+                                 fill=0, all_touched=True, dtype=np.uint8)
+                win[mask.astype(bool)] = cls
+
+            # Rail corridors: distance-to-track <= ballast half-width.
+            geoms = select(rail_lines, wrect)
+            if geoms:
+                center = rasterize([(g, 1) for g in geoms],
+                                   out_shape=win.shape, transform=wt,
+                                   fill=0, all_touched=True,
+                                   dtype=np.uint8).astype(bool)
+                if center.any():
+                    dc = distance_transform_edt(~center, sampling=resolution_m)
+                    win[dc <= RAIL_HALF_WIDTH_M] = SURFACE_RAILWAY
+
+            surface.commit(r0, r1, w0, win)
 
     def surface_class(self, east: float, north: float) -> int:
         """Surface class at geo coords; SURFACE_NATURAL = unclassified."""

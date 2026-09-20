@@ -47,3 +47,6 @@ class SyntheticSource:
     def bounds(self) -> tuple[float, float, float, float]:
         e = self.radius_edge_m
         return (-e, -e, e, e)
+
+    def may_claim(self, rect: tuple[float, float, float, float]) -> bool:
+        return self._field.may_claim(rect)

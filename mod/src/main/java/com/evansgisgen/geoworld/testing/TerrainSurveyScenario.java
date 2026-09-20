@@ -62,6 +62,9 @@ public final class TerrainSurveyScenario {
             // Landmark (Phase 9): the demo house at (200, 60) — sample a
             // roof column so its chunks generate.
             {200, 64},
+            // Corridor towns + Lincoln (Phase 10/11): Princeton ~34 km and
+            // downtown Lincoln ~60 km north of the Beatrice anchor.
+            {2716, -34307}, {2196, -60655}, {2474, -60052},
             {5000, 0}, {-5000, -5000},
     };
 
@@ -99,7 +102,8 @@ public final class TerrainSurveyScenario {
                                 double weight, int waterDepth, int roadClass,
                                 int surfaceClass, int buildingClass,
                                 int buildingLevels, String biome, boolean landmark,
-                                int vanilla, int expected, List<String> topBlocks) {}
+                                int vanilla, int expected, List<String> topBlocks,
+                                boolean sealedOverburden, int validStarts) {}
 
     private void run(MinecraftServer server) {
         ServerLevel level = server.overworld();
@@ -266,6 +270,25 @@ public final class TerrainSurveyScenario {
                                         || r.top == palette.window()));
             }
         }
+        // Overburden seal: full-coverage non-building columns must be solid
+        // for the 16 m under the deformed surface (bed, on wet columns) —
+        // caves still exist deeper, they just can't breach roads/ground.
+        // Building shells have interior air; landmarks own their columns.
+        for (ColumnReport r : reports) {
+            if (r.weight >= 0.98 && delegate != null
+                    && r.buildingClass == 0 && !r.landmark) {
+                pass &= check(String.format("no_cave_breach_%d_%d", r.x, r.z),
+                        r.sealedOverburden);
+            }
+        }
+        // Vanilla structures never start inside claimed ground — villages,
+        // shipwrecks, etc. are invalidated when their bbox touches it.
+        for (ColumnReport r : reports) {
+            if (r.weight >= 0.98 && delegate != null) {
+                pass &= check(String.format("no_structures_%d_%d", r.x, r.z),
+                        r.validStarts == 0);
+            }
+        }
         // Phase 9: the demo landmark placed at (200, 60) — anchor [5,0,0]
         // puts the north-face doorway at world (200, ground+1..2, 60) and
         // brick walls either side of it. LEVEL_FOUNDATION flattened the lot.
@@ -385,13 +408,41 @@ public final class TerrainSurveyScenario {
             }
         }
 
-        LOGGER.info("GEOWORLD-SURVEY x={} z={} topY={} ground={} ocean={} terrain={} top={} waterInTop24={} target={} w={} wd={} road={} surf={} bldg={}/{} biome={} vanilla={} expected={} blocks={}",
+        // Overburden probe: the 16 m below the deformed surface (below the
+        // bed on wet columns) must be solid — deformChunk seals cave/aquifer
+        // pockets there while leaving deeper caves alone.
+        boolean sealedOverburden = true;
+        if (chunk != null) {
+            int bandTop = waterDepth > 0 ? target : terrainY;
+            BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+            for (int y = bandTop - 1; y >= bandTop - 16 && y > minY; y--) {
+                BlockState s = level.getBlockState(pos.set(x, y, z));
+                if (s.isAir() || !s.getFluidState().isEmpty()) {
+                    sealedOverburden = false;
+                    break;
+                }
+            }
+        }
+        // Vanilla structure starts living in this chunk — claimed ground
+        // must have none (suppressed at createStructures).
+        int validStarts = 0;
+        if (chunk != null) {
+            for (var start : chunk.getAllStarts().values()) {
+                if (start.isValid()) {
+                    validStarts++;
+                }
+            }
+        }
+
+        LOGGER.info("GEOWORLD-SURVEY x={} z={} topY={} ground={} ocean={} terrain={} top={} waterInTop24={} target={} w={} wd={} road={} surf={} bldg={}/{} biome={} vanilla={} expected={} sealed={} starts={} blocks={}",
                 x, z, topY, groundY, oceanY, terrainY, top.getBlock(), waterInTop24, target,
                 String.format("%.2f", weight), waterDepth, roadClass, surfaceClass,
-                buildingClass, buildingLevels, biome, vanilla, expected, topBlocks);
+                buildingClass, buildingLevels, biome, vanilla, expected,
+                sealedOverburden, validStarts, topBlocks);
         return new ColumnReport(x, z, topY, groundY, oceanY, terrainY, terrainBlock,
                 top, waterInTop24, target, weight, waterDepth, roadClass,
                 surfaceClass, buildingClass, buildingLevels, biome,
-                landmarkIndex.contains(x, z), vanilla, expected, topBlocks);
+                landmarkIndex.contains(x, z), vanilla, expected, topBlocks,
+                sealedOverburden, validStarts);
     }
 }

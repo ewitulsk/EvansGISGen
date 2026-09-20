@@ -8,6 +8,8 @@ geo space (meters east/north of the anchor), and answers per-column queries.
 from __future__ import annotations
 
 import math
+import os
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -75,40 +77,75 @@ class DemSource:
 
         srcs = [rasterio.open(p) for p in tif_paths]
         src_crs = srcs[0].crs
-        # Crop bounds must be in the source CRS — transform all four corners of
-        # the geo bbox (the square is slightly rotated in the source CRS, so
-        # opposite corners alone would under-cover the region).
-        to_src = Transformer.from_crs(geo_crs, src_crs, always_xy=True)
-        corners = [to_src.transform(x, y)
-                   for x in (x0, x1) for y in (y0, y1)]
-        src_bounds = (min(c[0] for c in corners), min(c[1] for c in corners),
-                      max(c[0] for c in corners), max(c[1] for c in corners))
-        mosaic, mosaic_transform = merge(srcs, bounds=src_bounds)
         nodata = srcs[0].nodata
-        for s in srcs:
-            s.close()
+        # Per-source bounds for band-level coverage tests (a band beyond all
+        # rasters stays NaN -> vanilla instead of a fake filled plateau).
+        src_boxes = [tuple(s.bounds) for s in srcs]
+        to_src = Transformer.from_crs(geo_crs, src_crs, always_xy=True)
 
         width = math.ceil((x1 - x0) / resolution_m)
         height = math.ceil((y1 - y0) / resolution_m)
         self._dst_transform = Affine(resolution_m, 0.0, x0, 0.0, -resolution_m, y1)
-        grid = np.full((height, width), np.nan, dtype=np.float32)
-        reproject(
-            source=mosaic[0].astype(np.float32),
-            src_transform=mosaic_transform,
-            src_crs=src_crs,
-            src_nodata=nodata,
-            destination=grid,
-            dst_transform=self._dst_transform,
-            dst_crs=geo_crs,
-            dst_nodata=np.nan,
-            resampling=Resampling.bilinear,
-        )
-        # Fill any uncovered band at the edges by interpolation so the compiled
-        # region has no holes; influence ramping still fades the rim to vanilla.
-        valid = ~np.isnan(grid)
-        if not valid.all():
-            fillnodata(grid, mask=valid.astype(np.uint8))
+
+        # County-scale regions (Beatrice -> Lincoln is ~80 km) are far too big
+        # to mosaic + reproject in one resident array. Process the destination
+        # grid in horizontal bands backed by a disk memmap: peak RAM stays at
+        # ~a few hundred MB regardless of region size.
+        fd, tmp_path = tempfile.mkstemp(prefix="geoworld-dem-", suffix=".f32")
+        os.close(fd)
+        grid = np.memmap(tmp_path, dtype=np.float32, mode="w+",
+                         shape=(height, width))
+        self._grid_tmp = tmp_path
+
+        band_rows = 2048
+        for r0 in range(0, height, band_rows):
+            r1 = min(height, r0 + band_rows)
+            by1 = y1 - r0 * resolution_m          # band's north edge
+            by0 = y1 - r1 * resolution_m          # band's south edge
+            # Crop bounds in the source CRS — all four corners, since the geo
+            # rect is slightly rotated there.
+            corners = [to_src.transform(x, y)
+                       for x in (x0, x1) for y in (by0, by1)]
+            bb = (min(c[0] for c in corners), min(c[1] for c in corners),
+                  max(c[0] for c in corners), max(c[1] for c in corners))
+            if not any(bb[0] < sb[2] and bb[2] > sb[0]
+                       and bb[1] < sb[3] and bb[3] > sb[1]
+                       for sb in src_boxes):
+                continue                            # no DEM in this band
+            mosaic, mosaic_transform = merge(srcs, bounds=bb)
+            band = np.full((r1 - r0, width), np.nan, dtype=np.float32)
+            reproject(
+                source=mosaic[0].astype(np.float32),
+                src_transform=mosaic_transform,
+                src_crs=src_crs,
+                src_nodata=nodata,
+                destination=band,
+                dst_transform=Affine(resolution_m, 0.0, x0,
+                                     0.0, -resolution_m, by1),
+                dst_crs=geo_crs,
+                dst_nodata=np.nan,
+                resampling=Resampling.bilinear,
+            )
+            # Fill uncovered pockets inside the band so the compiled region
+            # has no holes; bands with no data at all keep NaN -> vanilla.
+            valid = ~np.isnan(band)
+            if valid.any() and not valid.all():
+                fillnodata(band, mask=valid.astype(np.uint8))
+            grid[r0:r1] = band
+            print(f"  dem band rows {r0}-{r1}", flush=True)
+            del mosaic, band
+        grid.flush()
+        for s in srcs:
+            s.close()
         self._grid = grid
+
+    def __del__(self):
+        # Best effort: drop the memmap then unlink its backing file.
+        try:
+            del self._grid
+            os.unlink(self._grid_tmp)
+        except Exception:
+            pass
 
     def bounds(self) -> tuple[float, float, float, float]:
         """(min_e, min_n, max_e, max_n) coverage rect in geo meters.
@@ -128,3 +165,8 @@ class DemSource:
 
     def influence(self, east: float, north: float) -> float:
         return self._influence_field.weight(east, north)
+
+    def may_claim(self, rect: tuple[float, float, float, float]) -> bool:
+        """True if the influence field could claim anything inside `rect`
+        — lets the build skip whole tiles without per-cell sampling."""
+        return self._influence_field.may_claim(rect)

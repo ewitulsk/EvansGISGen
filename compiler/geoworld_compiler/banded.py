@@ -1,0 +1,102 @@
+"""Banded raster grids for county-scale dataset rects.
+
+At 1 m resolution a Beatrice+Lincoln rect is ~1.4 G cells — too big to hold
+resident, and a full-grid distance transform is an ~11 GB float64.
+`BandedGrid` materializes the raster band-by-band into a disk-backed memmap
+so peak RAM stays ~a few hundred MB; `band_windows` yields scratch windows
+with extra context rows so band-local distance transforms stay exact (set
+the margin >= the field's farthest spatial reach).
+"""
+
+from __future__ import annotations
+
+import math
+import os
+import tempfile
+
+import numpy as np
+from affine import Affine
+
+
+def rects_intersect(a: tuple[float, float, float, float],
+                    b: tuple[float, float, float, float]) -> bool:
+    return a[0] < b[2] and a[2] > b[0] and a[1] < b[3] and a[3] > b[1]
+
+
+def geom_bbox(geom: dict) -> tuple[float, float, float, float]:
+    """(min_e, min_n, max_e, max_n) of a GeoJSON LineString/Polygon."""
+    coords = geom["coordinates"]
+    pts = coords if geom["type"] == "LineString" else coords[0]
+    es = [p[0] for p in pts]
+    ns = [p[1] for p in pts]
+    return (min(es), min(ns), max(es), max(ns))
+
+
+def select(geoms: list[tuple[tuple[float, float, float, float], dict]],
+           rect: tuple[float, float, float, float]) -> list[dict]:
+    """Geometries (stored as (bbox, geom) pairs) intersecting `rect` —
+    pre-filters features per band so rasterize doesn't walk the whole
+    dataset for every window."""
+    return [g for b, g in geoms if rects_intersect(b, rect)]
+
+
+class BandedGrid:
+    """A (height, width) raster built in horizontal bands on disk.
+
+    The backing store is a numpy memmap in the temp dir — the grid may be
+    far larger than RAM; per-cell queries just page through the file.
+    """
+
+    def __init__(self, bounds: tuple[float, float, float, float],
+                 resolution_m: float, dtype, band_rows: int = 4096):
+        self.bounds = bounds
+        self.resolution_m = resolution_m
+        e0, n0, e1, n1 = bounds
+        self.width = math.ceil((e1 - e0) / resolution_m)
+        self.height = math.ceil((n1 - n0) / resolution_m)
+        self.transform = Affine(resolution_m, 0.0, e0,
+                                0.0, -resolution_m, n1)
+        self.band_rows = band_rows
+        fd, tmp = tempfile.mkstemp(prefix="geoworld-grid-", suffix=".bin")
+        os.close(fd)
+        self._tmp = tmp
+        self.grid = np.memmap(tmp, dtype=dtype, mode="w+",
+                              shape=(self.height, self.width))
+
+    def __del__(self):
+        # Best effort: drop the map, then unlink the backing file.
+        try:
+            del self.grid
+            os.unlink(self._tmp)
+        except Exception:
+            pass
+
+    def __getitem__(self, idx):
+        return self.grid[idx]
+
+    def band_windows(self, margin_m: float = 0.0):
+        """Yield (r0, r1, w0, w1, window_transform) per band.
+
+        Rows [r0, r1) are the band to fill; [w0, w1) is the scratch window
+        including up to `margin_m` of context rows either side (clamped to
+        the grid). After filling a window (rasterize, EDT, ...), call
+        `commit(r0, r1, w0, window)`.
+        """
+        m = math.ceil(margin_m / self.resolution_m)
+        e0, _, _, n1 = self.bounds
+        res = self.resolution_m
+        for r0 in range(0, self.height, self.band_rows):
+            r1 = min(self.height, r0 + self.band_rows)
+            w0 = max(0, r0 - m)
+            w1 = min(self.height, r1 + m)
+            wt = Affine(res, 0.0, e0, 0.0, -res, n1 - w0 * res)
+            yield r0, r1, w0, w1, wt
+
+    def window_rect(self, w0: int, w1: int) -> tuple[float, float, float, float]:
+        """Geo rect covered by scratch rows [w0, w1) — for `select()`."""
+        e0, _, e1, n1 = self.bounds
+        res = self.resolution_m
+        return (e0, n1 - w1 * res, e1, n1 - w0 * res)
+
+    def commit(self, r0: int, r1: int, w0: int, window: np.ndarray) -> None:
+        self.grid[r0:r1] = window[r0 - w0: r0 - w0 + (r1 - r0)]

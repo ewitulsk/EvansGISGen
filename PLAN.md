@@ -761,6 +761,84 @@ That's excellent architecture. Beatrice, Lincoln, US-77, a future railroad, or a
 
 ---
 
+## Phase 12 — The parcel studio
+
+Turn Phase 9's landmark system into a curation loop: procedural buildings are the baseline, parcels define editable units, a dedicated dimension is the editor, and landmarks are the result. Players find their real house, build it properly, and it appears in the world — overwrite-safe.
+
+### Parcels are a lookup index, not a render layer
+
+Parcel polygons come from county GIS:
+
+- **Lancaster County (Lincoln)** — public ArcGIS FeatureServer (`Assessor/TaxParcels`), geoJSON + Extract, verified: `PARCELID`, `SITEADDRESS` (`"2819 S 16TH ST, LINCOLN, NE, 68502"`), `USEDSCRP`, `NetArea`, owners. Paged bbox pulls cover the region.
+- **Gage County (Beatrice)** — ArcGIS MapServer behind the gWorks portal (`mapserver01.gworks.com/.../Gage_County_NE_Assessor`), layer 88 `Parcels`. Queryable, real polygons — but `PID` only, **no address attributes**.
+
+The compiler gains `--parcels` (GeoJSON) → a `parcels.json` sidecar in the dataset:
+
+```json
+{
+    "parcels": [{"id": "0901100001000", "address": "2819 S 16TH ST, LINCOLN, NE, 68502", "rings": [...]}],
+    "addresses": [{"text": "2819 S 16TH ST, LINCOLN, NE", "east": 2100.0, "north": 61200.0, "parcel": "0901100001000"}]
+}
+```
+
+`addresses` is a **gazetteer** merged from parcel situs fields, OSM `addr:*` tags (already fetched with buildings), and OpenAddresses where coverage exists — so Gage gets address lookup even though its parcel layer lacks them. Runtime `ParcelIndex` (lazy, like `LandmarkIndex`) does point-in-polygon and address match. The generator still never sees a shapefile.
+
+### Lookup: layered, degrades gracefully
+
+`/geoworld studio <query>` resolution order:
+
+1. **Gazetteer address match** — offline, normalized (uppercase, canonical suffixes, collapse whitespace); instant
+2. **Configured geocoder** → coords → point-in-polygon — optional (`geocoder` block in `geoworld.json`: `provider`, `endpoint`, `timeoutMs`; Census free/no-key, Nominatim, or any URL-template provider). Absent → clean error suggesting coordinates
+3. **Raw coordinates** — always works, zero dependencies
+
+Address ambiguity self-resolves: the index only contains dataset parcels, so a Beatrice address can't collide with a Lincoln one. Geocoder queries bias `viewbox` to dataset bounds for the same reason.
+
+### Autocomplete is a suggestion chain
+
+Brigadier `SuggestionProvider` on the studio argument, merging:
+
+- **Local gazetteer** — sorted array + binary-search prefix match, then all-tokens-substring match; ~15 suggestions, parcel id in the tooltip. Synchronous, microseconds.
+- **Remote autocomplete** — only if `geocoder.autocomplete` configured (Photon `/api`, Pelias `/v1/autocomplete`; Nominatim's `/search` works but ranks partials poorly; Census has none). Async with a hard ~400 ms timeout — a keystroke never waits on HTTP; on timeout/error the local matches ship alone.
+
+### The studio dimension
+
+`geoworld:studio` — flat/void. Each parcel gets a **deterministic lot slot** (grid spaced by parcel bbox + margin; allocation persisted in world `SavedData`, so re-entering returns to work in progress).
+
+`/geoworld studio <query>` (op-level 2) stages the lot:
+
+- **Real DEM elevation** for the parcel plus a ~64 m context ring — players build against actual grade and see neighboring lots
+- **Outlines**: active parcel boundary drawn bright, neighbors faint, footprint outline in a third material
+- **Existing state**: if a landmark is already registered for the parcel, its `.nbt` is placed into the lot for continued editing (overwrite path); otherwise the deterministic procedural shell is pasted as scaffolding (`bare` flag for a clean lot)
+- Teleport player in; return position saved in player data
+
+`/geoworld studio save` — `StructureTemplate.fillFromWorld` captures the lot region **including terrain** (basements, retaining walls, terraformed slope all persist) → writes `.nbt` → upserts a landmark entry keyed by parcel id. Same parcel → replace. This needs one new `TerrainPolicy` variant:
+
+```java
+REPLACE_LOT   // template volume replaces the real lot volume, including
+              // below the anchor plane — not just blocks on a flattened pad
+```
+
+`/geoworld studio exit` — teleport back.
+
+### User content never lives in the compiled dataset
+
+Saved builds go to an **overlay** (`user_landmarks/` in the world save or config dir), merged over the dataset's compiled `landmarks/` at `LandmarkIndex.load` — overlay wins on id collision. Dataset rebuilds can't wipe player work; the compiled dataset stays pure.
+
+### Offline export for Structure Lab
+
+`geoworld_compiler export-parcel --address/--geo` → vanilla-format `.nbt` with parcel ring + footprint outline (+ optional real-terrain pad). Feeds `submit_structure` in MinecraftStructureInjector directly — the curation loop gets AI-assisted builds for free.
+
+### Ordering
+
+1. `fetch-parcels` (Lancaster FeatureServer + Gage MapServer) → `parcels.json` + gazetteer + `ParcelIndex`
+2. `export-parcel` compiler command (immediate Structure Lab value)
+3. Studio dimension + stage/enter/save/exit + `REPLACE_LOT` + overlay merge
+4. Geocoder config + suggestion chain
+
+**Definition of done:** `/geoworld studio "2819 S 16th St"` autocompletes, teleports to a real-terrain lot with the neighbor context drawn; the player edits the pasted shell; `save` writes a landmark that appears in the world on the next chunk gen and survives a dataset rebuild; re-entering the same parcel restores the saved build.
+
+---
+
 ## Runtime Architecture
 
 The runtime architecture to aim for:

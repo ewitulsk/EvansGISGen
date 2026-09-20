@@ -70,6 +70,11 @@ def main(argv: list[str] | None = None) -> int:
                    help="corridor: full-influence half-width (m)")
     b.add_argument("--corridor-ramp", type=float, default=1500.0,
                    help="corridor: blend-to-vanilla width beyond full (m)")
+    b.add_argument("--region", action="append", default=None, metavar="R",
+                   help="extra geographic region 'eMin,nMin,eMax,nMax' in "
+                        "geo meters (repeatable) — a second city such as "
+                        "Lincoln (Phase 11); influence fades over --ramp "
+                        "inside the rect edge")
 
     fe = sub.add_parser("fetch", help="download DEM rasters from the USGS TNM API")
     fe.add_argument("--bbox", required=True,
@@ -199,25 +204,34 @@ def main(argv: list[str] | None = None) -> int:
             from .dem import DemSource
 
             field = None
-            if args.corridor:
-                if not args.roads:
-                    parser.error("--corridor requires --roads")
-                from .influence import (BoxRamp, corridor_field, combine_max)
-                from .roads import clip_polylines, corridor_polylines
+            if args.corridor or args.region:
+                from .influence import (BoxRamp, RectRamp, corridor_field,
+                                        combine_max)
+                fields = [BoxRamp(args.radius, args.ramp)]
+                if args.corridor:
+                    if not args.roads:
+                        parser.error("--corridor requires --roads")
+                    from .roads import clip_polylines, corridor_polylines
 
-                # Clip the corridor one reach inside the dataset rect so the
-                # ramp fully decays before coverage ends — a polyline cut at
-                # the boundary would leave w=1 right at the dataset edge.
-                reach = args.corridor_full + args.corridor_ramp
-                clip = (bounds[0] + reach, bounds[1] + reach,
-                        bounds[2] - reach, bounds[3] - reach)
-                lines = clip_polylines(
-                    corridor_polylines(args.roads, projection), clip)
-                field = combine_max(
-                    BoxRamp(args.radius, args.ramp),
-                    corridor_field(lines, bounds,
-                                   args.corridor_full, args.corridor_ramp))
-                print(f"corridor: {len(lines)} major-road ways")
+                    # Clip the corridor one reach inside the dataset rect so
+                    # the ramp fully decays before coverage ends — a polyline
+                    # cut at the boundary would leave w=1 right at the edge.
+                    reach = args.corridor_full + args.corridor_ramp
+                    clip = (bounds[0] + reach, bounds[1] + reach,
+                            bounds[2] - reach, bounds[3] - reach)
+                    lines = clip_polylines(
+                        corridor_polylines(args.roads, projection), clip)
+                    fields.append(corridor_field(
+                        lines, bounds, args.corridor_full,
+                        args.corridor_ramp))
+                    print(f"corridor: {len(lines)} major-road ways")
+                for spec in args.region or []:
+                    rect = tuple(float(s) for s in spec.split(","))
+                    if len(rect) != 4:
+                        parser.error("--region expects 'eMin,nMin,eMax,nMax'")
+                    fields.append(RectRamp(rect, args.ramp))
+                    print(f"region: {rect}")
+                field = combine_max(*fields)
 
             source = DemSource(
                 args.dem,

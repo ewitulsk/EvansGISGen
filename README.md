@@ -13,13 +13,20 @@ dataset). See [PLAN.md](PLAN.md) for the full implementation plan.
 └── format/     # dataset format spec
 ```
 
-## Current status: Phase 10
+## Current status: Phase 11
 
 - `GeoChunkGenerator` wraps a vanilla `ChunkGenerator` (`geoworld:geoworld`)
   and delegates everything to it, then deforms terrain from geographic data:
   `lerp(vanilla, dataset_elevation, influence)` per column, shifting the whole
-  column so strata/caves move with the surface. `getBaseHeight`,
-  `getBaseColumn`, and `getFirstOccupiedHeight` report the adjusted terrain.
+  column so strata/caves move with the surface — then seals the top
+  `OVERBURDEN_M` (16 m, scaled by influence) into solid dirt/stone so caves
+  and aquifers can't daylight through roads or floors. Deeper caves are left
+  intact and still generate under claimed ground. `applyCarvers` is skipped
+  on claimed chunks (no canyons slashing streets) and `createStructures`
+  invalidates any vanilla structure start whose bounding box touches
+  claimed cells — villages and shipwrecks never appear inside the
+  geography. `getBaseHeight`, `getBaseColumn`, and `getFirstOccupiedHeight`
+  report the adjusted terrain.
 - `GeoTransform` anchors projected meter offsets to block coordinates
   (`+east -> +x`, `+north -> -z`), with independent horizontal/vertical scale
   and a configurable vertical datum.
@@ -102,17 +109,28 @@ dataset). See [PLAN.md](PLAN.md) for the full implementation plan.
   smootherstep to vanilla over `--corridor-ramp`. Corridor polylines are
   clipped one reach inside the dataset bounds so the ramp fully decays
   before coverage ends — no seam where the real highway continues past
-  the data. The compiled dataset now runs from just south of Beatrice
-  (z ≈ +7,900) ~26 km north along US-77 through Pickrell to z ≈ -25,800,
-  with DEM/roads/water/land-use/buildings along it.
+  the data.
+- Lincoln (Phase 11): a second city region via `--region e,n,e,n`
+  (repeatable → `RectRamp` fields combined with `combine_max`), plus the
+  corridor extended north. The dataset bounds grew to ~17 × 80 km
+  (Beatrice + US-77 through Cortland/Princeton + Lincoln metro), so two
+  scale changes came with it: `DemSource` mosaics/reprojects the DEM in
+  horizontal bands into a disk-backed memmap instead of one resident
+  grid (a ~1.4 G-cell float32 grid would need ~5.5 GB), and the build
+  skips whole tiles the influence field cannot claim via
+  `Field.may_claim(rect)` — exact for `RasterField` (grid slice check),
+  conservative rect tests for the ramps. OSM fetches for Lincoln were
+  split into sub-bbox pulls (Overpass 504s on city-sized queries) and
+  merged with `scripts/merge_osm.py`.
 - `geoworld_compiler` (Python) writes the format: `manifest.json` + 256x256
   tiles with zlib-compressed sections (elevation int16, influence u8,
   surface/road u8, water bitset, water depth u8, building u8 + levels u8). `dem.py` mosaics + reprojects real elevation
   rasters (rasterio/pyproj) onto the geo meter grid; `fetch.py` downloads
   USGS 3DEP 1 m DEM tiles from The National Map.
 - `datasets/beatrice.geoworld` is real USGS 1 m LiDAR terrain for
-  Beatrice, NE plus the US-77 corridor: the 8 km square around downtown
-  plus a ~4 km-wide strip running ~26 km north past Pickrell
+  Beatrice, NE plus the US-77 corridor and Lincoln: the 8 km square
+  around downtown, a ~4 km-wide strip running ~60 km north through
+  Pickrell/Cortland/Princeton, and the Lincoln metro region
   (372-428 m real elevation). Spawn is downtown Beatrice; the Big Blue
   River valley is visible east of the origin.
   `datasets/synthetic.geoworld` remains as the no-GIS pipeline test.
@@ -132,7 +150,12 @@ Block `(x, z)` maps to geo `(east_m, -north_m)` relative to the anchor at
 | Dusenbery-Doyle Reservoir          | -600  | 1985  |
 | Demo landmark house                | 200   | 60    |
 | US-77 road deck over stream        | 57    | 1279  |
-| US-77 corridor, north end          | ~2900 | -25800|
+| Cortland (corridor town)           | 1835  | -31062|
+| Princeton (corridor town)          | 2716  | -34307|
+| Downtown Lincoln (13th & P)        | 2196  | -60655|
+| Nebraska State Capitol             | 2474  | -60052|
+| Memorial Stadium (UNL)             | 1923  | -61426|
+| Haymarket                          | 1431  | -60869|
 - Debug commands: `/geoworld info`, `/geoworld geo`,
   `/geoworld geo <east> <north>`.
 

@@ -39,6 +39,17 @@ class Field(Protocol):
         """(min_east, min_north, max_east, max_north) containing all weight > 0."""
         ...
 
+    def may_claim(self, rect: tuple[float, float, float, float]) -> bool:
+        """True if any point inside `rect` could have weight > 0 — a tile
+        that fails this is skipped without per-cell sampling. Exact or
+        conservative; never false-negative."""
+        ...
+
+
+def _rects_intersect(a: tuple[float, float, float, float],
+                     b: tuple[float, float, float, float]) -> bool:
+    return a[0] < b[2] and a[2] > b[0] and a[1] < b[3] and a[3] > b[1]
+
 
 class BoxRamp:
     """Square coverage region: weight 1 inside, smootherstep ramp to 0.
@@ -62,6 +73,37 @@ class BoxRamp:
         e = self.half_extent_m
         return (-e, -e, e, e)
 
+    def may_claim(self, rect: tuple[float, float, float, float]) -> bool:
+        e = self.half_extent_m
+        return _rects_intersect(rect, (-e, -e, e, e))
+
+
+class RectRamp:
+    """Rectangular coverage region: weight 1 inside, smootherstep ramp to 0.
+
+    BoxRamp generalized to an arbitrary rect — a second city region (e.g.
+    Lincoln) that isn't centered on the anchor. The ramp sits inside the
+    rect edge, same as BoxRamp.
+    """
+
+    def __init__(self, bounds: tuple[float, float, float, float],
+                 ramp_m: float):
+        self.rect = bounds
+        self.ramp_m = ramp_m
+
+    def weight(self, east: float, north: float) -> float:
+        e0, n0, e1, n1 = self.rect
+        edge_dist = min(east - e0, north - n0, e1 - east, n1 - north)
+        if edge_dist <= 0.0:
+            return 0.0
+        return smootherstep(min(1.0, edge_dist / self.ramp_m))
+
+    def bounds(self) -> tuple[float, float, float, float]:
+        return self.rect
+
+    def may_claim(self, rect: tuple[float, float, float, float]) -> bool:
+        return _rects_intersect(rect, self.rect)
+
 
 class DiscRamp:
     """Circular region: weight 1 within full_m, smootherstep to 0 at edge_m."""
@@ -84,6 +126,10 @@ class DiscRamp:
     def bounds(self) -> tuple[float, float, float, float]:
         return (self.center_east - self.edge_m, self.center_north - self.edge_m,
                 self.center_east + self.edge_m, self.center_north + self.edge_m)
+
+    def may_claim(self, rect: tuple[float, float, float, float]) -> bool:
+        # Conservative: the disc's bounding square.
+        return _rects_intersect(rect, self.bounds())
 
 
 class CorridorRamp:
@@ -141,6 +187,14 @@ class CorridorRamp:
     def bounds(self) -> tuple[float, float, float, float]:
         return self._bounds
 
+    def may_claim(self, rect: tuple[float, float, float, float]) -> bool:
+        if not _rects_intersect(rect, self._bounds):
+            return False
+        for _, _, _, _, bbox in self._segments:
+            if _rects_intersect(rect, bbox):
+                return True
+        return False
+
 
 class RasterField:
     """Influence field sampled from a precomputed weight grid.
@@ -167,6 +221,21 @@ class RasterField:
 
     def bounds(self) -> tuple[float, float, float, float]:
         return self._bounds
+
+    def may_claim(self, rect: tuple[float, float, float, float]) -> bool:
+        # Exact: the weight grid cells overlapping the rect.
+        e0, n0, e1, n1 = self._bounds
+        c0 = math.floor((rect[0] - e0) * self._inv)
+        c1 = math.floor((rect[2] - e0) * self._inv)
+        r0 = math.floor((n1 - rect[3]) * self._inv)
+        r1 = math.floor((n1 - rect[1]) * self._inv)
+        c0 = max(0, c0)
+        r0 = max(0, r0)
+        c1 = min(self._grid.shape[1] - 1, c1)
+        r1 = min(self._grid.shape[0] - 1, r1)
+        if r1 < r0 or c1 < c0:
+            return False
+        return bool(self._grid[r0:r1 + 1, c0:c1 + 1].any())
 
 
 def corridor_field(polylines: Sequence[Sequence[tuple[float, float]]],
@@ -219,3 +288,6 @@ class _Combined:
             return (0.0, 0.0, 0.0, 0.0)
         return (min(b[0] for b in bs), min(b[1] for b in bs),
                 max(b[2] for b in bs), max(b[3] for b in bs))
+
+    def may_claim(self, rect: tuple[float, float, float, float]) -> bool:
+        return any(f.may_claim(rect) for f in self._fields)

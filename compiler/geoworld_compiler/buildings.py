@@ -29,8 +29,9 @@ import urllib.request
 from pathlib import Path
 
 import numpy as np
-from affine import Affine
 from rasterio.features import rasterize
+
+from .banded import BandedGrid, geom_bbox, select
 
 from .transform import Projection
 
@@ -193,19 +194,18 @@ class BuildingSource:
         e0, n0, e1, n1 = bounds
         self._shape = (math.ceil((n1 - n0) / resolution_m),
                        math.ceil((e1 - e0) / resolution_m))
-        transform = Affine(resolution_m, 0.0, e0,
-                           0.0, -resolution_m, n1)
 
         # Group footprints by (class, levels, priority) — one rasterize per
-        # distinct combo, painted in ascending priority order.
-        groups: dict[tuple[int, int, int], list[dict]] = {}
+        # distinct combo, painted in ascending priority order. (bbox, geom)
+        # pairs let each band pre-filter to visible features.
+        groups: dict[tuple[int, int, int], list[tuple[tuple, dict]]] = {}
 
         def add(coords: list[tuple[float, float]],
                 key: tuple[int, int, int]) -> None:
             if coords[0] != coords[-1]:
                 coords.append(coords[0])
-            groups.setdefault(key, []).append(
-                {"type": "Polygon", "coordinates": [coords]})
+            g = {"type": "Polygon", "coordinates": [coords]}
+            groups.setdefault(key, []).append((geom_bbox(g), g))
 
         # Microsoft ML footprints: class unknown -> GENERIC at a priority
         # below every OSM group; levels from the height estimate when present.
@@ -237,18 +237,29 @@ class BuildingSource:
                 coords = [projection.to_geo(p["lat"], p["lon"]) for p in geom]
                 add(coords, (cls, levels, prio))
 
-        building = np.zeros(self._shape, dtype=np.uint8)
-        b_levels = np.zeros(self._shape, dtype=np.uint8)
-        for (cls, levels, _prio), geoms in sorted(groups.items(),
-                                                key=lambda kv: kv[0][2]):
-            mask = rasterize([(g, 1) for g in geoms],
-                             out_shape=self._shape, transform=transform,
-                             fill=0, all_touched=True, dtype=np.uint8).astype(bool)
-            building[mask] = cls
-            b_levels[mask] = levels
+        building = BandedGrid(bounds, resolution_m, np.uint8)
+        levels_grid = BandedGrid(bounds, resolution_m, np.uint8)
+        # Polygons need no context margin — there is no distance field.
+        for r0, r1, w0, w1, wt in building.band_windows(margin_m=0.0):
+            win_b = np.zeros((w1 - w0, building.width), dtype=np.uint8)
+            win_l = np.zeros((w1 - w0, building.width), dtype=np.uint8)
+            wrect = building.window_rect(w0, w1)
+            for (cls, levels, _prio), pairs in sorted(
+                    groups.items(), key=lambda kv: kv[0][2]):
+                geoms = select(pairs, wrect)
+                if not geoms:
+                    continue
+                mask = rasterize([(g, 1) for g in geoms],
+                                 out_shape=win_b.shape, transform=wt,
+                                 fill=0, all_touched=True,
+                                 dtype=np.uint8).astype(bool)
+                win_b[mask] = cls
+                win_l[mask] = levels
+            building.commit(r0, r1, w0, win_b)
+            levels_grid.commit(r0, r1, w0, win_l)
 
         self._building = building
-        self._levels = b_levels
+        self._levels = levels_grid
 
     def _cell(self, east: float, north: float) -> tuple[int, int] | None:
         col = math.floor((east - self.bounds[0]) / self.resolution_m)

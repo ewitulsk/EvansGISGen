@@ -33,6 +33,7 @@ from affine import Affine
 from rasterio.features import rasterize
 from scipy.ndimage import distance_transform_edt
 
+from .banded import BandedGrid, geom_bbox, select
 from .transform import Projection
 
 OVERPASS = "https://overpass-api.de/api/interpreter"
@@ -199,30 +200,39 @@ class RoadSource:
                                  0.0, -resolution_m, n1)
 
         # Batch features that share identical params so each distinct
-        # cross-section costs one EDT on the full grid.
-        groups: dict[RoadParams, list[dict]] = {}
+        # cross-section costs one EDT per band. (bbox, geom) pairs let each
+        # band pre-filter to visible features.
+        groups: dict[RoadParams, list[tuple[tuple, dict]]] = {}
         for params, coords in roads:
-            groups.setdefault(params, []).append(self._linestring(coords))
+            g = self._linestring(coords)
+            groups.setdefault(params, []).append((geom_bbox(g), g))
 
-        road = np.zeros(self._shape, dtype=np.uint8)
-        for params in sorted(groups, key=lambda p: p.prio):
-            zone = self._classify(groups[params], params)
-            if zone is not None:
-                road[zone > 0] = zone[zone > 0]
+        road = BandedGrid(bounds, resolution_m, np.uint8)
         self._road = road
+        # Cross-section reach is <= ~20 m even for tag-widened arterials.
+        for r0, r1, w0, w1, wt in road.band_windows(margin_m=64.0):
+            win = np.zeros((w1 - w0, road.width), dtype=np.uint8)
+            wrect = road.window_rect(w0, w1)
+            for params in sorted(groups, key=lambda p: p.prio):
+                zone = self._classify(select(groups[params], wrect), params,
+                                      win.shape, wt)
+                if zone is not None:
+                    win[zone > 0] = zone[zone > 0]
+            road.commit(r0, r1, w0, win)
 
     @staticmethod
     def _linestring(coords: list[tuple[float, float]]) -> dict:
         return {"type": "LineString", "coordinates": coords}
 
-    def _classify(self, geoms: list[dict], p: RoadParams) -> np.ndarray | None:
-        center = rasterize([(g, 1) for g in geoms], out_shape=self._shape,
-                           transform=self._transform, fill=0,
+    def _classify(self, geoms: list[dict], p: RoadParams,
+                  shape: tuple[int, int], transform: Affine) -> np.ndarray | None:
+        center = rasterize([(g, 1) for g in geoms], out_shape=shape,
+                           transform=transform, fill=0,
                            all_touched=True, dtype=np.uint8).astype(bool)
         if not center.any():
             return None
         dc = distance_transform_edt(~center, sampling=self.resolution_m)
-        zone = np.zeros(self._shape, dtype=np.uint8)
+        zone = np.zeros(shape, dtype=np.uint8)
         outer = p.half + p.curb + p.walk + p.shoulder
         band = dc <= outer
         if p.shoulder > 0:

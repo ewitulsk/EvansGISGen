@@ -9,6 +9,7 @@ import com.mojang.datafixers.util.Pair;
 import com.mojang.serialization.MapCodec;
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Holder;
@@ -45,10 +46,14 @@ import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.levelgen.RandomState;
 import net.minecraft.world.level.levelgen.blending.Blender;
 import net.minecraft.world.level.levelgen.feature.ConfiguredFeature;
+import net.minecraft.world.level.levelgen.structure.BoundingBox;
 import net.minecraft.world.level.levelgen.structure.Structure;
 import net.minecraft.world.level.levelgen.structure.StructureSet;
+import net.minecraft.world.level.levelgen.structure.StructureStart;
 import net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplateManager;
 import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Chunk generator that wraps a vanilla {@link ChunkGenerator} (typically a
@@ -61,13 +66,26 @@ import org.jetbrains.annotations.Nullable;
  * at the rim. All other behavior is delegated to the wrapped generator.
  */
 public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
+    private static final Logger LOGGER = LoggerFactory.getLogger(GeoChunkGenerator.class);
+
     private static final double FULL_RADIUS = 400.0;
     private static final double EDGE_RADIUS = 500.0;
     private static final int TARGET_HEIGHT = 70;
 
     private static final BlockState FILL_BLOCK = Blocks.STONE.defaultBlockState();
+    private static final BlockState DIRT = Blocks.DIRT.defaultBlockState();
     private static final BlockState AIR = Blocks.AIR.defaultBlockState();
     private static final BlockState WATER = Blocks.WATER.defaultBlockState();
+
+    /**
+     * Solid "overburden" depth at full geographic influence: cave and aquifer
+     * pockets within this many blocks under the deformed surface are filled.
+     * The column shift preserves caves, which would otherwise daylight through
+     * roads and buildings; deep caves below the band are left intact (scaled
+     * by influence so they fade back in across the blend ramp). Real Nebraska
+     * ground carries ~15+ m of unconsolidated till/loess over bedrock anyway.
+     */
+    private static final int OVERBURDEN_M = 16;
 
     // Road surface class ids — shared with the compiler (roads.py).
     static final int ROAD_NONE = 0;
@@ -411,6 +429,21 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
                         }
                     }
                 }
+
+                // Overburden: seal caves/aquifers in the band under the
+                // deformed surface (the bed on wet columns — river water sits
+                // above it and is never touched). Dirt for the upper few
+                // meters so exposed cave ceilings read as subsoil.
+                int overburden = (int) Math.ceil(target.weight() * OVERBURDEN_M);
+                int top = surface + delta;
+                for (int y = top - 1; y >= top - overburden && y > minY; y--) {
+                    BlockState cur = chunk.getBlockState(pos.set(x, y, z));
+                    if (cur.isAir() || !cur.getFluidState().isEmpty()) {
+                        chunk.setBlockState(pos.set(x, y, z),
+                                y >= top - 3 ? DIRT : FILL_BLOCK, false);
+                        modified = true;
+                    }
+                }
             }
         }
 
@@ -464,9 +497,49 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
         delegate.buildSurface(level, structureManager, random, chunk);
     }
 
+    /**
+     * True if any block column inside the chunk carries geographic influence.
+     * Stride-8 sampling is enough: claims are regions/corridors hundreds of
+     * meters wide — an 8 m sampling gap can't hide one.
+     */
+    private boolean chunkClaimed(ChunkPos pos) {
+        if (dataset.isEmpty()) {
+            return false;
+        }
+        for (int lx = 0; lx < 16; lx += 8) {
+            for (int lz = 0; lz < 16; lz += 8) {
+                if (dataset.influence(pos.getBlockX(lx), pos.getBlockZ(lz)) > 0.0f) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * True if a structure bounding box reaches any claimed column. Sampled on
+     * an 8 m grid over the box's footprint (clamped into the box at the end
+     * points) — villages/shipwrecks are tens of meters across.
+     */
+    private boolean boxTouchesClaim(BoundingBox box) {
+        for (int x = box.minX(); x <= box.maxX(); x += 8) {
+            for (int z = box.minZ(); z <= box.maxZ(); z += 8) {
+                if (dataset.influence(x, z) > 0.0f) {
+                    return true;
+                }
+            }
+        }
+        return dataset.influence(box.maxX(), box.maxZ()) > 0.0f;
+    }
+
     @Override
     public void applyCarvers(WorldGenRegion level, long seed, RandomState random, BiomeManager biomeManager, StructureManager structureManager, ChunkAccess chunk, GenerationStep.Carving step) {
-        delegate.applyCarvers(level, seed, random, biomeManager, structureManager, chunk, step);
+        // Skip carving entirely on claimed chunks: ravines/canyons slashing
+        // through streets read as damage, not terrain. Density caves below
+        // the overburden band still exist — deformChunk only seals the top.
+        if (!chunkClaimed(chunk.getPos())) {
+            delegate.applyCarvers(level, seed, random, biomeManager, structureManager, chunk, step);
+        }
     }
 
     @Override
@@ -893,6 +966,25 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
     @Override
     public void createStructures(RegistryAccess registryAccess, ChunkGeneratorStructureState structureState, StructureManager structureManager, ChunkAccess chunk, StructureTemplateManager structureTemplateManager) {
         delegate.createStructures(registryAccess, structureState, structureManager, chunk, structureTemplateManager);
+        if (dataset.isEmpty()) {
+            return;
+        }
+        // Real geography owns this ground — vanilla structures never belong
+        // inside it (plains-biome noise still lets shipwrecks "find" ocean
+        // under Nebraska, and villages get sliced by the deformation). A
+        // start whose bounding box touches ANY claimed cell is invalidated
+        // whole, so a village centered just outside can't leave floating
+        // houses at the city edge. getAllStarts() is unmodifiable; writing
+        // INVALID_START is the supported suppress — every consumer checks
+        // isValid().
+        for (Map.Entry<Structure, StructureStart> entry : chunk.getAllStarts().entrySet()) {
+            StructureStart start = entry.getValue();
+            if (start.isValid() && boxTouchesClaim(start.getBoundingBox())) {
+                LOGGER.debug("Suppressing {} at {}: reaches into claimed ground",
+                        entry.getKey(), chunk.getPos());
+                chunk.setStartForStructure(entry.getKey(), StructureStart.INVALID_START);
+            }
+        }
     }
 
     @Override

@@ -5,8 +5,8 @@ import math
 import pytest
 
 from geoworld_compiler.influence import (
-    BoxRamp, CorridorRamp, DiscRamp, RasterField, combine_max, combine_sum,
-    corridor_field, smootherstep,
+    BoxRamp, CorridorRamp, DiscRamp, RasterField, RectRamp, combine_max,
+    combine_sum, corridor_field, smootherstep,
 )
 
 
@@ -35,6 +35,22 @@ def test_box_ramp():
     # edges dominates — pushing north lowers weight at the same easting.
     assert f.weight(3700.0, 3800.0) < f.weight(3700.0, 0.0)
     assert f.weight(3600.0, 3600.0) == f.weight(3600.0, 0.0)
+
+
+def test_rect_ramp():
+    # A second city region away from the anchor (Phase 11: Lincoln).
+    f = RectRamp((1000.0, 50000.0, 3000.0, 52000.0), ramp_m=500.0)
+    assert f.weight(2000.0, 51000.0) == 1.0        # center
+    assert f.weight(1500.0, 51000.0) == 1.0        # inside, before the ramp
+    assert f.weight(1000.0, 51000.0) == 0.0        # at the edge
+    assert f.weight(0.0, 0.0) == 0.0               # far outside
+    assert f.weight(2000.0, 53000.0) == 0.0        # just past the north edge
+    mid = f.weight(1200.0, 51000.0)                # inside the west ramp
+    assert 0.0 < mid < 1.0
+    # Nearest edge dominates: a point near a corner fades faster than a
+    # point the same distance inside one edge.
+    assert f.weight(1200.0, 50100.0) < f.weight(1200.0, 51000.0)
+    assert f.bounds() == (1000.0, 50000.0, 3000.0, 52000.0)
 
 
 def test_disc_ramp():

@@ -32,6 +32,7 @@ from affine import Affine
 from rasterio.features import rasterize
 from scipy.ndimage import distance_transform_edt
 
+from .banded import BandedGrid, geom_bbox, rects_intersect, select
 from .influence import smootherstep
 from .transform import Projection
 
@@ -121,53 +122,63 @@ class HydroSource:
         self.resolution_m = resolution_m
         self.bank_m = bank_m
         e0, n0, e1, n1 = bounds
-        width = math.ceil((e1 - e0) / resolution_m)
-        height = math.ceil((n1 - n0) / resolution_m)
-        # Geo meters -> pixels: col = (e - e0)/res, row = (n1 - n)/res.
+        self._shape = (math.ceil((n1 - n0) / resolution_m),
+                       math.ceil((e1 - e0) / resolution_m))
         self._transform = Affine(resolution_m, 0.0, e0,
                                  0.0, -resolution_m, n1)
-        self._shape = (height, width)
 
-        depth = np.zeros(self._shape, dtype=np.float32)
+        # Pre-bbox geometries so each band only rasterizes what it can see.
+        line_geoms = {cls: [(geom_bbox(g), g) for g in
+                            [self._linestring(c) for k, c in lines if k == cls]]
+                      for cls in LINE_CLASSES}
+        area_geoms = [(geom_bbox(g), g, AREA_DEPTHS.get(tag, AREA_DEPTHS[None]))
+                      for tag, ring in areas for g in [self._polygon(ring)]]
 
-        # Line features: one EDT per waterway class (half-width is
-        # class-uniform), depth ramps from centerline to bank.
-        for cls, (half_w, max_depth) in LINE_CLASSES.items():
-            geoms = [self._linestring(c) for k, c in lines if k == cls]
-            if not geoms:
-                continue
-            center = rasterize([(g, 1) for g in geoms], out_shape=self._shape,
-                               transform=self._transform, fill=0,
-                               all_touched=True, dtype=np.uint8).astype(bool)
-            if not center.any():
-                continue
-            # Distance to nearest centerline cell, in meters. The bank slope
-            # is capped at the half-width so narrow channels (ditches,
-            # streams) still reach their full depth at the centerline.
-            dc = distance_transform_edt(~center, sampling=resolution_m)
-            bank = min(bank_m, half_w)
-            inside = np.clip((half_w - dc) / bank, 0.0, 1.0)
-            cls_depth = max_depth * _ss_array(inside)
-            np.maximum(depth, cls_depth, out=depth)
-
-        # Area features: burn each polygon's max depth (deepest wins),
-        # then ramp inside distance to the shoreline.
-        if areas:
-            # Sort ascending so deeper water overwrites shallower.
-            shapes = [(self._polygon(ring), AREA_DEPTHS.get(tag, AREA_DEPTHS[None]))
-                      for tag, ring in sorted(
-                          areas, key=lambda a: AREA_DEPTHS.get(a[0], AREA_DEPTHS[None]))]
-            area_max = rasterize(shapes, out_shape=self._shape,
-                                 transform=self._transform, fill=0.0,
-                                 dtype=np.float32)
-            mask = area_max > 0.0
-            if mask.any():
-                # Distance inside the polygon to its shoreline, in meters.
-                da = distance_transform_edt(mask, sampling=resolution_m)
-                inside = np.clip(da / bank_m, 0.0, 1.0)
-                np.maximum(depth, area_max * _ss_array(inside), out=depth)
-
+        depth = BandedGrid(bounds, resolution_m, np.float32)
         self._depth = depth
+        # Context must cover the farthest field reach: river half-width (15)
+        # + bank ramp (6) for lines, bank_m inside a shoreline for areas.
+        for r0, r1, w0, w1, wt in depth.band_windows(margin_m=32.0):
+            win = np.zeros((w1 - w0, depth.width), dtype=np.float32)
+            wrect = depth.window_rect(w0, w1)
+
+            # Line features: one EDT per waterway class (half-width is
+            # class-uniform), depth ramps from centerline to bank.
+            for cls, (half_w, max_depth) in LINE_CLASSES.items():
+                geoms = select(line_geoms[cls], wrect)
+                if not geoms:
+                    continue
+                center = rasterize([(g, 1) for g in geoms],
+                                   out_shape=win.shape, transform=wt, fill=0,
+                                   all_touched=True, dtype=np.uint8).astype(bool)
+                if not center.any():
+                    continue
+                # Distance to nearest centerline cell, in meters. The bank
+                # slope is capped at the half-width so narrow channels
+                # (ditches, streams) still reach full depth at centerline.
+                dc = distance_transform_edt(~center, sampling=resolution_m)
+                bank = min(bank_m, half_w)
+                inside = np.clip((half_w - dc) / bank, 0.0, 1.0)
+                np.maximum(win, max_depth * _ss_array(inside), out=win)
+
+            # Area features: burn each polygon's max depth (deepest wins),
+            # then ramp inside distance to the shoreline.
+            visible = [(g, d) for b, g, d in area_geoms
+                       if rects_intersect(b, wrect)]
+            if visible:
+                # Sort ascending so deeper water overwrites shallower.
+                area_max = rasterize(
+                    [(g, d) for g, d in sorted(visible, key=lambda t: t[1])],
+                    out_shape=win.shape, transform=wt, fill=0.0,
+                    dtype=np.float32)
+                mask = area_max > 0.0
+                if mask.any():
+                    # Distance inside the polygon to its shoreline, in meters.
+                    da = distance_transform_edt(mask, sampling=resolution_m)
+                    inside = np.clip(da / bank_m, 0.0, 1.0)
+                    np.maximum(win, area_max * _ss_array(inside), out=win)
+
+            depth.commit(r0, r1, w0, win)
 
     @staticmethod
     def _linestring(coords: list[tuple[float, float]]) -> dict:

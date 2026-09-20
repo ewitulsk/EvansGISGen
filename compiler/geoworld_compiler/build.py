@@ -18,6 +18,7 @@ class Source(Protocol):
     def elevation_m(self, east: float, north: float) -> float | None: ...
     def influence(self, east: float, north: float) -> float: ...
     def bounds(self) -> tuple[float, float, float, float]: ...
+    def may_claim(self, rect: tuple[float, float, float, float]) -> bool: ...
 
 
 class Hydro(Protocol):
@@ -81,6 +82,16 @@ def build_dataset(
     n = TILE_SIZE * TILE_SIZE
     for tx in range(t_min_x, t_max_x + 1):
         for tz in range(t_min_z, t_max_z + 1):
+            # Whole-tile reject: a tile the influence field cannot claim is
+            # pure vanilla — skip it without 65k per-cell field queries.
+            # (Bounds-spanning datasets like Beatrice+Lincoln are mostly
+            # empty space between claimed regions.)
+            tile_rect = (transform.east_meters(tx * TILE_SIZE),
+                         transform.north_meters(tz * TILE_SIZE + TILE_SIZE),
+                         transform.east_meters(tx * TILE_SIZE + TILE_SIZE),
+                         transform.north_meters(tz * TILE_SIZE))
+            if not source.may_claim(tile_rect):
+                continue
             elevation = [NODATA] * n
             influence = bytearray(n)
             surface = bytearray(n)
