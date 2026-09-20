@@ -32,6 +32,8 @@ LAYER_BITS = {
     "building_levels": 0x80,  # u8[TILE^2] floor count inside footprints
     "roadz": 0x100,      # i16[TILE^2]  elevated deck top Y (NODATA = none)
     "roade": 0x200,      # u8[TILE^2]   elevated deck cross-section class
+    "building_id": 0x400,   # u16[TILE^2] footprint instance ids (0 = none)
+    "building_roof": 0x800, # i16[TILE^2] uniform roof top Y (NODATA = none)
 }
 _LAYER_ORDER = sorted(LAYER_BITS, key=LAYER_BITS.get)
 
@@ -42,6 +44,16 @@ def pack_elevation(ints: list[int] | tuple[int, ...]) -> bytes:
 
     a = array.array("h", ints)  # native int16
     if struct.pack("=h", 1) != struct.pack(">h", 1):  # little-endian host
+        a.byteswap()
+    return a.tobytes()
+
+
+def pack_u16(ints: list[int] | tuple[int, ...]) -> bytes:
+    """Pack 65536 values into big-endian uint16 (building instance ids)."""
+    import array
+
+    a = array.array("H", ints)  # native uint16
+    if struct.pack("=H", 1) != struct.pack(">H", 1):  # little-endian host
         a.byteswap()
     return a.tobytes()
 

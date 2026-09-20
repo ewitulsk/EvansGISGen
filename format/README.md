@@ -88,6 +88,8 @@ then one section per set mask bit, in ascending bit order:
 | 0x80 | building_levels | `u8[65536]` floor count in footprints |
 | 0x100 | roadz    | `i16[65536]` elevated deck top block Y (Phase 13) |
 | 0x200 | roade    | `u8[65536]` deck cross-section class (Phase 13) |
+| 0x400 | building_id | `u16[65536]` footprint instance ids (Phase 15) |
+| 0x800 | building_roof | `i16[65536]` uniform roof top Y (Phase 15) |
 
 Bitset packing: bit `i` is bit `i % 8` (LSB-first) of byte `i / 8`.
 
@@ -107,16 +109,26 @@ Notes:
   farmland, `3` forest, `4` residential, `5` commercial, `6` industrial,
   `7` parking, `8` railway, `9` park. Semantic land use only — the runtime
   theme maps classes to blocks.
-- `building` class ids (Phase 8): `0` none, `1` residential, `2` commercial,
-  `3` industrial, `4` civic, `5` outbuilding, `6` generic. `building_levels`
-  holds the floor count inside footprint cells (`building:levels`/`height`
-  tags, else class defaults). The runtime extrudes a shell: floor slab,
-  perimeter walls with window banding, flat roof.
+- `building` class ids: `0` none, `1` residential, `2` commercial,
+  `3` industrial, `4` civic, `5` outbuilding, `6` generic (Phase 8).
+  `building_levels` holds the floor count inside footprint cells
+  (`building:levels`/`height` tags, else class defaults). The runtime
+  extrudes a shell: floor slab, perimeter walls with window banding, roof.
 - `water` is the footprint mask; `water_depth` (Phase 5) is the water column
   depth in blocks. At wet columns `elevation` holds the **channel bed** Y
   (the compiler bakes the riverbed into the elevation layer), and the runtime
   fills `bed+1 .. bed+depth` with water — so the water surface lands at
   `bed + depth`, which is the DEM's water-surface elevation.
+- `building_id`/`building_roof` (Phase 15): per-footprint instance data.
+  `building_id` is a stable hash of the polygon centroid (1..65535; 0 = no
+  building) — two abutting footprints carry different ids even when they
+  share a class, so the runtime walls between them instead of merging row
+  buildings into one blob. `building_roof` is the instance's single roof
+  top block Y, solved from the highest DEM ground under the footprint plus
+  `levels*3+1` (NODATA where the compiler had no DEM answer) — a building
+  on a slope gets one connected flat roof instead of per-cell stepping.
+  Both layers are optional: datasets without them keep the Phase 8
+  per-cell/class-boundary fallback.
 - `roadz`/`roade` (Phase 13): elevated road decks — bridges and layer>0
   overpasses. `roadz` holds the deck's top block Y per column (NODATA where
   no deck), `roade` the deck's cross-section class (same ids as `road`,

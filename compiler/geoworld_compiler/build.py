@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Protocol
 
 from .manifest import write_manifest
-from .tileio import (NODATA, TILE_SIZE, pack_bitset, pack_elevation,
+from .tileio import (NODATA, TILE_SIZE, pack_bitset, pack_elevation, pack_u16,
                      tile_filename, write_tile)
 from .transform import GeoTransform, Projection
 
@@ -46,6 +46,8 @@ class Buildings(Protocol):
 
     def building_class(self, east: float, north: float) -> int: ...
     def building_levels(self, east: float, north: float) -> int: ...
+    def building_id(self, east: float, north: float) -> int: ...
+    def building_roof(self, east: float, north: float) -> int: ...
 
 
 def build_dataset(
@@ -104,6 +106,8 @@ def build_dataset(
             roade = bytearray(n)
             building = bytearray(n)
             b_levels = bytearray(n)
+            b_id = [0] * n
+            b_roof = [NODATA] * n
             any_influence = False
             any_tile_water = False
             any_tile_road = False
@@ -158,6 +162,8 @@ def build_dataset(
                         if bc:
                             building[i] = bc
                             b_levels[i] = buildings.building_levels(east, north)
+                            b_id[i] = buildings.building_id(east, north)
+                            b_roof[i] = buildings.building_roof(east, north)
                             any_tile_building = True
                     influence[i] = min(255, max(0, int(w * 255.0 + 0.5)))
                     any_influence = True
@@ -177,6 +183,8 @@ def build_dataset(
                 if any_tile_building:
                     layers["building"] = bytes(building)
                     layers["building_levels"] = bytes(b_levels)
+                    layers["building_id"] = pack_u16(b_id)
+                    layers["building_roof"] = pack_elevation(b_roof)
                 write_tile(tiles_dir / tile_filename(tx, tz), tx, tz, layers)
                 written.append((tx, tz))
                 any_water = any_water or any_tile_water
@@ -192,7 +200,8 @@ def build_dataset(
               + (["water", "water_depth"] if any_water else [])
               + (["road"] if any_road else [])
               + (["roadz", "roade"] if any_deck else [])
-              + (["building", "building_levels"] if any_building else []))
+              + (["building", "building_levels",
+                  "building_id", "building_roof"] if any_building else []))
     write_manifest(out, name=name, transform=transform, projection=projection,
                    layers=layers, tiles=written)
     # Street furniture sidecar: sign placements mined from the road ways

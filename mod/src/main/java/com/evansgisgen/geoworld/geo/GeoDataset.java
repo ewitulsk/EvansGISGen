@@ -200,6 +200,19 @@ public final class GeoDataset {
         return tile == null ? 0 : tile.buildingLevels(localCoord(x), localCoord(z));
     }
 
+    /** Footprint-instance id at (x, z); 0 = no building (Phase 15). */
+    public int buildingIdAt(int x, int z) {
+        GeoTile tile = tileAt(x, z).orElse(null);
+        return tile == null ? 0 : tile.buildingId(localCoord(x), localCoord(z));
+    }
+
+    /** Uniform roof-top block-Y of the instance at (x, z); NO_DATA = none. */
+    public int buildingRoofYAt(int x, int z) {
+        GeoTile tile = tileAt(x, z).orElse(null);
+        return tile == null || !tile.hasBuildingRoof()
+                ? GeoTile.NO_DATA : tile.buildingRoofY(localCoord(x), localCoord(z));
+    }
+
     /** Elevated road-deck top block-Y at (x, z); NO_DATA = no deck. */
     public int roadDeckYAt(int x, int z) {
         GeoTile tile = tileAt(x, z).orElse(null);

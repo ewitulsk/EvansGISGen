@@ -897,6 +897,120 @@ Same engine, same corridor primitive — the dataset's southern reach extends ~4
 
 ---
 
+## Phase 15 — Building instances: walls between buildings, whole roofs
+
+Two visible symptoms in downtown Lincoln have the same root: the compiler flattens
+all footprints into shared class/levels rasters, so adjacent buildings merge into
+one blob, and the runtime derives `roof = ground + levels*3 + 1` **per cell** on
+sloping terrain — so roofs step and tear, and tall towers shear into partial
+boxes where `building_levels` varies inside the merged blob.
+
+### What changes
+
+- **New layer `building_id` (u16)**: the compiler rasterizes each footprint
+  polygon with its own instance id (in the same priority order that assigns
+  class). Two abutting buildings keep distinct ids → the runtime draws a wall
+  wherever a 4-neighbor has a *different* id, so party walls separate row
+  buildings instead of one merged mass. Id doubles as a deterministic seed for
+  facade variety (Phase 18).
+- **New layer `building_roof` (s16)**: per-instance uniform roof top block-Y =
+  `max(ground) + levels*3 + 1`, where `ground` is the DEM-derived target height
+  sampled across the instance's cells and `levels` is the instance's modal floor
+  count. Uniform per building → no tearing, towers get their full height.
+- **`building_levels` normalized to the instance mode** — no more mixed MS/OSM
+  floor counts inside one blob.
+- **Runtime**: walls run per-cell `ground-2 → roof-1` (a long downhill wall reads
+  as a foundation skirt), floor slab at `base = roof - levels*3 - 1` (== the pad
+  at the instance's highest ground), roof at `roof`. Cells on id-boundaries are
+  edge cells. Without the new layers (old datasets) the runtime falls back to the
+  Phase 8 behavior.
+
+**Definition of done:** adjacent downtown buildings render with a wall between
+them; a building on a slope has one connected flat roof; tall towers are full
+height; survey gains `building_wall_between_*` and `building_roof_uniform_*`
+assertions.
+
+**Built**: `building_id` (u16, 0x400) + `building_roof` (i16, 0x800) layers —
+the compiler rasterizes each footprint's polygon index through LUTs (the u16 id
+is only the emitted identity, so hash collisions can't corrupt class/roof) and
+solves one roof per instance over the footprint's max DEM ground. Runtime walls
+between different-id neighbors (party walls) and builds `base = roof − levels·3 − 1`
+→ `roof` shells; old datasets fall back to per-cell heights. Survey:
+`building_party_wall_*` / `building_uniform_roof_*` green on the Lincoln pair
+(tower roof Y102), the 5 m-sloped footprint, and the 6-floor — all with the
+dataset rebuilt (17,652 tiles).
+
+---
+
+## Phase 16 — Rich building taxonomy from tags we already have + POIs
+
+Only ~6 class ids exist and visually it's "brick house vs. stone box." But the
+fetched OSM building ways already carry `amenity` (974), `shop` (501), `office`,
+`tourism`, `healthcare`, `cuisine`, `building:use`, `roof:shape` — free signal.
+POIs (restaurants, gas stations) are usually *nodes inside* the footprint, not
+tags on it, so coverage multiplies if we join them.
+
+### What changes
+
+- **New fetch `fetch-pois`**: `node[amenity|shop|office|tourism|leisure|
+  healthcare|craft]` in the same bboxes → `pois_all.json`.
+- **POI→footprint join**: point-in-polygon each POI node against the footprint
+  index; a contained POI contributes class votes (e.g. `amenity=fuel` → gas
+  station) that can upgrade the way's class.
+- **New class ids** (~14): supermarket/bigbox, restaurant/food, fuel, school,
+  church, hospital/medical, hotel, parking, sports/grandstand, farm/agri —
+  added after the existing 6 (u8 has room; palettes per class).
+- **Palettes per class**: fuel = white concrete + flat canopy, supermarket =
+  light gray + big glass band, church = stone brick + tall window, etc.
+
+**Definition of done:** real Lincoln/Marysville buildings carry the new classes
+(a gas station, a supermarket, a church render distinctly); survey gains a
+`building_class_*` assertion on a known typed building.
+
+---
+
+## Phase 17 — Outbuildings: garages and sheds where they belong
+
+`building=garage|garages|shed` already maps to OUTBUILDING (3,793 ways in the
+current fetch) — but only where OSM bothered to tag them. In MS-only coverage
+every garage is a GENERIC blob, so houses lose their garages.
+
+### What changes
+
+- **Area + adjacency heuristic at compile time**: a GENERIC (MS-only) footprint
+  with area below a garage threshold (~≤ 90 m²) and within a few meters of a
+  RESIDENTIAL instance is reclassified OUTBUILDING. Sheds/barns near farmland
+  follow the same rule with a larger cap.
+- **Outbuilding palette**: 1 level, slab floor, plain walls — no garage doors
+  (per spec, footprint only).
+
+**Definition of done:** MS-only residential blocks show garage/shed boxes where
+the footprints exist; survey gains a `building_outbuilding_*` assertion.
+
+---
+
+## Phase 18 — Residential variety: facades and roof shapes
+
+Every house is the same brick box. Use the instance id as a deterministic seed
+plus `roof:shape` where OSM tagged it (82 hipped, 52 gabled, 67 flat in the
+current fetch).
+
+### What changes
+
+- **Facade variants** (residential, seeded by `building_id`): brick, light
+  siding, timber/stucco — different wall + window + trim palettes so adjacent
+  houses differ deterministically.
+- **Roof styles**: flat for commercial/industrial/civic; pitched (hip or gable)
+  for residential — built by stepping the roof inward above the eave line
+  (`building_roof` = eave height). `roof:shape` overrides the seed where tagged.
+- Same treatment for OUTBUILDING garages (low hip) so roofs stop reading as
+  floating slabs.
+
+**Definition of done:** two neighboring houses differ in facade; a pitched roof
+assertion in survey; all prior checks stay green.
+
+---
+
 ## Runtime Architecture
 
 The runtime architecture to aim for:

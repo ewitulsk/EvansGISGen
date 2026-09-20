@@ -35,6 +35,8 @@ public final class GeoTile {
     static final int LAYER_BUILDING_LEVELS = 0x80;
     static final int LAYER_ROADZ = 0x100;
     static final int LAYER_ROADE = 0x200;
+    static final int LAYER_BUILDING_ID = 0x400;
+    static final int LAYER_BUILDING_ROOF = 0x800;
 
     private final int tileX;
     private final int tileZ;
@@ -49,12 +51,15 @@ public final class GeoTile {
     @Nullable private final byte[] buildingLevels;
     @Nullable private final short[] roadDeck;
     @Nullable private final byte[] roadDeckClass;
+    @Nullable private final char[] buildingId;
+    @Nullable private final short[] buildingRoof;
 
     private GeoTile(int tileX, int tileZ, int tileSize, @Nullable short[] elevation,
             @Nullable byte[] influence, @Nullable byte[] surface, @Nullable byte[] road,
             @Nullable byte[] waterBits, @Nullable byte[] waterDepth,
             @Nullable byte[] building, @Nullable byte[] buildingLevels,
-            @Nullable short[] roadDeck, @Nullable byte[] roadDeckClass) {
+            @Nullable short[] roadDeck, @Nullable byte[] roadDeckClass,
+            @Nullable char[] buildingId, @Nullable short[] buildingRoof) {
         this.tileX = tileX;
         this.tileZ = tileZ;
         this.tileSize = tileSize;
@@ -68,6 +73,8 @@ public final class GeoTile {
         this.buildingLevels = buildingLevels;
         this.roadDeck = roadDeck;
         this.roadDeckClass = roadDeckClass;
+        this.buildingId = buildingId;
+        this.buildingRoof = buildingRoof;
     }
 
     public static GeoTile read(Path file, int tileSize) throws IOException {
@@ -98,8 +105,10 @@ public final class GeoTile {
         byte[] buildingLevels = null;
         short[] roadDeck = null;
         byte[] roadDeckClass = null;
+        char[] buildingId = null;
+        short[] buildingRoof = null;
 
-        for (int bit = 1; bit <= 0x200; bit <<= 1) {
+        for (int bit = 1; bit <= 0x800; bit <<= 1) {
             if ((mask & bit) == 0) {
                 continue;
             }
@@ -126,11 +135,20 @@ public final class GeoTile {
                     ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN).asShortBuffer().get(roadDeck);
                 }
                 case LAYER_ROADE -> roadDeckClass = payload;
+                case LAYER_BUILDING_ID -> {
+                    buildingId = new char[rawLen / 2];
+                    ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN).asCharBuffer().get(buildingId);
+                }
+                case LAYER_BUILDING_ROOF -> {
+                    buildingRoof = new short[rawLen / 2];
+                    ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN).asShortBuffer().get(buildingRoof);
+                }
                 default -> { /* unknown bit, already skipped by mask check */ }
             }
         }
         return new GeoTile(tileX, tileZ, tileSize, elevation, influence, surface, road,
-                water, waterDepth, building, buildingLevels, roadDeck, roadDeckClass);
+                water, waterDepth, building, buildingLevels, roadDeck, roadDeckClass,
+                buildingId, buildingRoof);
     }
 
     private static byte[] decompress(int codec, byte[] stored, int rawLen) throws IOException {
@@ -246,6 +264,32 @@ public final class GeoTile {
     /** Floor count for this column (0 outside footprints). */
     public int buildingLevels(int localX, int localZ) {
         return buildingLevels == null ? 0 : buildingLevels[idx(localX, localZ)] & 0xFF;
+    }
+
+    public boolean hasBuildingId() {
+        return buildingId != null;
+    }
+
+    /**
+     * Footprint-instance id for this column (0 = no footprint). Two
+     * abutting OSM polygons carry different ids even when they share a
+     * class, so the runtime can wall between them (Phase 15).
+     */
+    public int buildingId(int localX, int localZ) {
+        return buildingId == null ? 0 : buildingId[idx(localX, localZ)];
+    }
+
+    public boolean hasBuildingRoof() {
+        return buildingRoof != null;
+    }
+
+    /**
+     * Uniform roof-top block-Y for this column's instance (NO_DATA when
+     * the compiler had no DEM answer). One value per footprint — the roof
+     * no longer steps with the terrain beneath it (Phase 15).
+     */
+    public int buildingRoofY(int localX, int localZ) {
+        return buildingRoof == null ? NO_DATA : buildingRoof[idx(localX, localZ)];
     }
 
     public boolean hasRoadDeck() {

@@ -366,7 +366,9 @@ def main(argv: list[str] | None = None) -> int:
                 from .buildings import BuildingSource
                 buildings = BuildingSource(
                     args.buildings, projection, bounds=sb,
-                    ms_json_path=args.ms_buildings)
+                    ms_json_path=args.ms_buildings,
+                    elev_m=getattr(source, "elevation_m", None),
+                    transform=transform)
 
         out = build_dataset(args.out, name=args.name, transform=transform,
                             source=source, projection=projection,

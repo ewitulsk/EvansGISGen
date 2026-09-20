@@ -72,6 +72,11 @@ public final class TerrainSurveyScenario {
             // itself, the 347 8th Rd farm address (~1.6 km east of the
             // highway, inside the claimed region), and Marysville.
             {8521, 33321}, {13484, 33561}, {6902, 33390}, {9750, 47113},
+            // Building instances (Phase 15): two abutting footprints in
+            // downtown Lincoln — a 2-floor outbuilding beside a 20-level
+            // tower (party wall + full-height tower) — a footprint
+            // straddling a 5 m slope (one uniform roof), and a 6-floor.
+            {1969, -60876}, {1969, -60877}, {2683, -59850}, {2102, -60000},
             {5000, 0}, {-5000, -5000},
     };
 
@@ -111,7 +116,8 @@ public final class TerrainSurveyScenario {
                                 int buildingLevels, String biome, boolean landmark,
                                 int vanilla, int expected, List<String> topBlocks,
                                 boolean sealedOverburden, int validStarts,
-                                int deckY, int deckClass) {}
+                                int deckY, int deckClass,
+                                int buildingId, int buildingRoof) {}
 
     private void run(MinecraftServer server) {
         ServerLevel level = server.overworld();
@@ -282,6 +288,47 @@ public final class TerrainSurveyScenario {
                         palette != null && r.topY >= r.target + 4
                                 && (r.top == palette.roof() || r.top == palette.wall()
                                         || r.top == palette.window()));
+            }
+        }
+        // Phase 15: a compiled roof height means one roof baseline per
+        // instance — the world's top block sits at that Y, not stepped
+        // with the terrain (the sloped-footprint samples prove it).
+        for (ColumnReport r : reports) {
+            if (r.buildingClass > 0 && r.buildingRoof != GeoTile.NO_DATA
+                    && r.weight >= 0.98 && delegate != null
+                    && r.waterDepth == 0 && r.roadClass == 0 && !r.landmark
+                    && r.deckY == GeoTile.NO_DATA) {
+                var palette = com.evansgisgen.geoworld.worldgen.GeoChunkGenerator
+                        .buildingPalette(r.buildingClass);
+                pass &= check(String.format("building_uniform_roof_%d_%d", r.x, r.z),
+                        palette != null && r.topY == r.buildingRoof
+                                && r.top == palette.roof());
+            }
+        }
+        // Phase 15: where a cardinal neighbor belongs to a different
+        // footprint instance, this column is a boundary — it must carry a
+        // party wall (the solid row just under the roof slab).
+        for (ColumnReport r : reports) {
+            if (r.buildingId != 0 && r.weight >= 0.98 && delegate != null
+                    && r.waterDepth == 0 && r.roadClass == 0 && !r.landmark
+                    && r.deckY == GeoTile.NO_DATA) {
+                boolean boundary = dataset.buildingIdAt(r.x + 1, r.z) != r.buildingId
+                        || dataset.buildingIdAt(r.x - 1, r.z) != r.buildingId
+                        || dataset.buildingIdAt(r.x, r.z + 1) != r.buildingId
+                        || dataset.buildingIdAt(r.x, r.z - 1) != r.buildingId;
+                if (!boundary) {
+                    continue;
+                }
+                var palette = com.evansgisgen.geoworld.worldgen.GeoChunkGenerator
+                        .buildingPalette(r.buildingClass);
+                BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+                // The solid wall row just under the roof slab.
+                int wallY = (r.buildingRoof != GeoTile.NO_DATA
+                        ? r.buildingRoof : r.topY) - 1;
+                BlockState underRoof = level.getBlockState(
+                        pos.set(r.x, wallY, r.z));
+                pass &= check(String.format("building_party_wall_%d_%d", r.x, r.z),
+                        palette != null && underRoof == palette.wall());
             }
         }
         // Overburden seal: full-coverage non-building columns must be solid
@@ -537,6 +584,8 @@ public final class TerrainSurveyScenario {
         int surfaceClass = 0;
         int buildingClass = 0;
         int buildingLevels = 0;
+        int buildingId = 0;
+        int buildingRoof = GeoTile.NO_DATA;
         int deckY = GeoTile.NO_DATA;
         int deckClass = 0;
         GeoTile tile = dataset.tileAt(x, z).orElse(null);
@@ -552,6 +601,8 @@ public final class TerrainSurveyScenario {
             surfaceClass = tile.surfaceClass(lx, lz);
             buildingClass = tile.buildingClass(lx, lz);
             buildingLevels = tile.buildingLevels(lx, lz);
+            buildingId = tile.buildingId(lx, lz);
+            buildingRoof = tile.buildingRoofY(lx, lz);
             deckY = tile.roadDeckY(lx, lz);
             deckClass = tile.roadDeckClass(lx, lz);
         }
@@ -600,6 +651,7 @@ public final class TerrainSurveyScenario {
                 top, waterInTop24, target, weight, waterDepth, roadClass,
                 surfaceClass, buildingClass, buildingLevels, biome,
                 landmarkIndex.contains(x, z), vanilla, expected, topBlocks,
-                sealedOverburden, validStarts, deckY, deckClass);
+                sealedOverburden, validStarts, deckY, deckClass,
+                buildingId, buildingRoof);
     }
 }

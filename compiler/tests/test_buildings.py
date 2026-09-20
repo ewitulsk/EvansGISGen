@@ -133,3 +133,67 @@ def test_osm_overrides_ms(tmp_path, projection):
 def test_requires_at_least_one_input(tmp_path, projection):
     with pytest.raises(ValueError):
         BuildingSource(None, projection, bounds=(-200.0, -200.0, 200.0, 200.0))
+
+
+def test_adjacent_buildings_get_distinct_ids(tmp_path, projection):
+    # Row houses sharing an edge must carry different instance ids so the
+    # runtime can wall between them.
+    path = _write(tmp_path, [
+        _way(1, {"building": "house"}, _poly(0.0, 0.0, 10.0)),
+        _way(2, {"building": "house"},
+             [(10.0, -10.0), (30.0, -10.0), (30.0, 10.0),
+              (10.0, 10.0), (10.0, -10.0)]),
+    ])
+    src = BuildingSource(path, projection, bounds=(-200.0, -200.0, 200.0, 200.0))
+    id_a = src.building_id(0.0, 0.0)
+    id_b = src.building_id(20.0, 0.0)
+    assert id_a != 0 and id_b != 0 and id_a != id_b
+    assert src.building_id(-60.0, -60.0) == 0
+
+
+def test_roof_uniform_per_instance(tmp_path, projection):
+    # A footprint straddling a slope gets ONE roof height, padded to the
+    # highest ground under it — no per-cell tearing.
+    from geoworld_compiler.transform import GeoTransform
+
+    def elev(east, north):
+        return 100.0 + east * 0.5  # ground rises eastward
+
+    transform = GeoTransform(origin_x=0, origin_z=0,
+                             horizontal_meters_per_block=1.0,
+                             vertical_meters_per_block=1.0,
+                             datum_elevation_meters=0.0, datum_y=0)
+    path = _write(tmp_path, [
+        _way(1, {"building": "house", "building:levels": "2"},
+             _poly(0.0, 0.0, 20.0)),
+    ])
+    src = BuildingSource(path, projection, bounds=(-200.0, -200.0, 200.0, 200.0),
+                         elev_m=elev, transform=transform)
+    # Max ground over the bbox: e=+20 -> 110 m -> block 110; roof = 110+7.
+    assert src.building_roof(-15.0, 0.0) == 117
+    assert src.building_roof(15.0, 0.0) == 117
+
+
+def test_roof_nodata_without_dem(tmp_path, projection):
+    # No DEM sampler: ids still emit, roofs read NODATA (runtime falls back).
+    from geoworld_compiler.tileio import NODATA
+
+    path = _write(tmp_path, [
+        _way(1, {"building": "house"}, _poly(0.0, 0.0, 10.0)),
+    ])
+    src = BuildingSource(path, projection, bounds=(-200.0, -200.0, 200.0, 200.0))
+    assert src.building_id(0.0, 0.0) != 0
+    assert src.building_roof(0.0, 0.0) == NODATA
+
+
+def test_roof_shell_does_not_donut_ms(tmp_path, projection):
+    # OSM building=roof paints BELOW Microsoft: it must not carve a hole
+    # in the MS footprint covering the same ground.
+    osm = _write(tmp_path, [
+        _way(1, {"building": "roof"}, _poly(0.0, 0.0, 12.0)),
+    ])
+    ms = _ms(tmp_path, [(_poly(0.0, 0.0, 12.0), -1.0)])
+    src = BuildingSource(osm, projection,
+                         bounds=(-200.0, -200.0, 200.0, 200.0),
+                         ms_json_path=ms)
+    assert src.building_class(0.0, 0.0) == BUILDING_GENERIC

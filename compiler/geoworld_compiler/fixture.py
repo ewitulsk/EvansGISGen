@@ -14,13 +14,16 @@ Pattern (i = local_z * 256 + local_x):
     building_levels[i] = i % 9                  (u8)
     roadz[i]        = NODATA if i % 5 == 0 else (i % 400) - 150   (i16)
     roade[i]        = i % 8                     (u8)
+    building_id[i]  = i % 65536                 (u16)
+    building_roof[i]= NODATA if i % 7 == 0 else (i % 300) - 100   (i16)
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from .tileio import NODATA, TILE_SIZE, pack_bitset, pack_elevation, write_tile
+from .tileio import (NODATA, TILE_SIZE, pack_bitset, pack_elevation, pack_u16,
+                     write_tile)
 
 
 def write_fixture(path: str | Path) -> Path:
@@ -36,9 +39,14 @@ def write_fixture(path: str | Path) -> Path:
     roadz = pack_elevation([NODATA if i % 5 == 0 else (i % 400) - 150
                             for i in range(n)])
     roade = bytes(i % 8 for i in range(n))
+    building_id = pack_u16([i % 65536 for i in range(n)])
+    building_roof = pack_elevation([NODATA if i % 7 == 0 else (i % 300) - 100
+                                   for i in range(n)])
     return write_tile(path, 0, 0,
                       {"elevation": elevation, "influence": influence,
                        "surface": surface, "road": road, "water": water,
                        "water_depth": water_depth, "building": building,
                        "building_levels": building_levels,
-                       "roadz": roadz, "roade": roade})
+                       "roadz": roadz, "roade": roade,
+                       "building_id": building_id,
+                       "building_roof": building_roof})

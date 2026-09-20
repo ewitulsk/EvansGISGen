@@ -28,6 +28,8 @@ import org.junit.jupiter.api.Test;
  *   building_levels[i] = i % 9           (u8)
  *   roadz[i]     = NO_DATA if i % 5 == 0 else (i % 400) - 150   (i16)
  *   roade[i]     = i % 8                 (u8)
+ *   building_id[i]  = i % 65536          (u16)
+ *   building_roof[i]= NO_DATA if i % 7 == 0 else (i % 300) - 100 (i16)
  * </pre>
  *
  * i = localZ * 256 + localX.
@@ -131,6 +133,20 @@ class GeoTileTest {
         assertEquals(1, tile.roadDeckClass(1, 0));
         assertEquals(7, tile.roadDeckClass(7, 0));
         assertEquals(2, tile.roadDeckClass(2, 1));             // i = 258 % 8
+    }
+
+    @Test
+    void buildingInstance() throws IOException {
+        GeoTile tile = loadFixture();
+        assertTrue(tile.hasBuildingId());
+        assertTrue(tile.hasBuildingRoof());
+        assertEquals(1, tile.buildingId(1, 0));                // i = 1
+        assertEquals(65535, tile.buildingId(255, 255));        // i = 65535
+        assertEquals(257, tile.buildingId(1, 1));              // i = 257
+        assertEquals(GeoTile.NO_DATA, tile.buildingRoofY(0, 0));   // i = 0 -> % 7
+        assertEquals(-99, tile.buildingRoofY(1, 0));               // i = 1 -> -100+1
+        assertEquals(GeoTile.NO_DATA, tile.buildingRoofY(7, 0));
+        assertEquals(99, tile.buildingRoofY(199, 0));              // i = 199 % 300
     }
 
     /**

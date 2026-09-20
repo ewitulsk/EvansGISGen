@@ -761,21 +761,50 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
                 if (ground <= minY) {
                     continue;
                 }
-                BuildPalette palette = BUILDING_PALETTES[cls];
+                int id = tile.buildingId(tlx, tlz);
+                BuildPalette palette = buildingPalette(cls);
                 int levels = Math.max(1, tile.buildingLevels(tlx, tlz));
-                int roof = Math.min(topY, ground + levels * 3 + 1);
+                // Phase 15: one roof height per instance, solved by the
+                // compiler from the footprint's highest ground. On slopes
+                // the old per-cell roof stepped with the terrain and tore;
+                // now `base` is the instance's uniform first-floor level
+                // and `roof` its single flat top. Legacy datasets without
+                // the roof layer fall back to the per-cell formula.
+                int compiledRoof = tile.buildingRoofY(tlx, tlz);
+                int roof;
+                int base;
+                if (compiledRoof != GeoTile.NO_DATA) {
+                    roof = Math.min(topY, compiledRoof);
+                    base = Math.max(minY + 1, roof - levels * 3 - 1);
+                } else {
+                    base = ground;
+                    roof = Math.min(topY, ground + levels * 3 + 1);
+                }
 
-                boolean edge = dataset.buildingClassAt(x + 1, z) == BUILDING_NONE
-                        || dataset.buildingClassAt(x - 1, z) == BUILDING_NONE
-                        || dataset.buildingClassAt(x, z + 1) == BUILDING_NONE
-                        || dataset.buildingClassAt(x, z - 1) == BUILDING_NONE;
+                // Instance-aware edges (Phase 15): a wall wherever the
+                // neighbor is a different footprint — abutting row
+                // buildings get party walls instead of merging into one
+                // blob. Without the id layer, keep the old class-presence
+                // boundary test.
+                boolean edge;
+                if (id != 0) {
+                    edge = dataset.buildingIdAt(x + 1, z) != id
+                            || dataset.buildingIdAt(x - 1, z) != id
+                            || dataset.buildingIdAt(x, z + 1) != id
+                            || dataset.buildingIdAt(x, z - 1) != id;
+                } else {
+                    edge = dataset.buildingClassAt(x + 1, z) == BUILDING_NONE
+                            || dataset.buildingClassAt(x - 1, z) == BUILDING_NONE
+                            || dataset.buildingClassAt(x, z + 1) == BUILDING_NONE
+                            || dataset.buildingClassAt(x, z - 1) == BUILDING_NONE;
+                }
                 if (edge) {
-                    for (int y = ground - FOUNDATION_DEPTH; y < roof; y++) {
+                    for (int y = base - FOUNDATION_DEPTH; y < roof; y++) {
                         if (y <= minY) {
                             continue;
                         }
                         BlockState cur = chunk.getBlockState(pos.set(x, y, z));
-                        if (y < ground) {
+                        if (y < base) {
                             // Foundation: only fill voids, never dig terrain.
                             if (cur.isAir() || !cur.getFluidState().isEmpty()) {
                                 chunk.setBlockState(pos, palette.wall(), false);
@@ -784,18 +813,23 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
                         }
                         // Window pattern: glass on a diagonal grid through the
                         // mid-wall rows; ground row and top row stay solid.
-                        boolean window = y > ground && y < roof - 1
+                        boolean window = y > base && y < roof - 1
                                 && Math.floorMod(x + z, 3) == 0;
                         chunk.setBlockState(pos,
                                 window ? palette.window() : palette.wall(), false);
                     }
                 } else {
-                    // Interior: floor replaces the terrain top.
-                    chunk.setBlockState(pos.set(x, ground, z), palette.floor(), false);
+                    // Interior: one uniform floor slab per instance; air
+                    // below the slab (downhill side) fills as crawlspace.
+                    chunk.setBlockState(pos.set(x, base, z), palette.floor(), false);
+                    for (int y = ground + 1; y < base; y++) {
+                        BlockState cur = chunk.getBlockState(pos.set(x, y, z));
+                        if (cur.isAir() || !cur.getFluidState().isEmpty()) {
+                            chunk.setBlockState(pos, palette.wall(), false);
+                        }
+                    }
                 }
-                if (roof <= topY) {
-                    chunk.setBlockState(pos.set(x, roof, z), palette.roof(), false);
-                }
+                chunk.setBlockState(pos.set(x, roof, z), palette.roof(), false);
                 modified = true;
             }
         }

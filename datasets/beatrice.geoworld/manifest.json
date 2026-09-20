@@ -31,7 +31,9 @@
     "roadz",
     "roade",
     "building",
-    "building_levels"
+    "building_levels",
+    "building_id",
+    "building_roof"
   ],
   "tile_count": 17652,
   "bounds": {
