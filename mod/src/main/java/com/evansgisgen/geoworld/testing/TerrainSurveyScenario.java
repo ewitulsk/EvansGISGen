@@ -5,6 +5,7 @@ import com.evansgisgen.geoworld.geo.GeoDataset;
 import com.evansgisgen.geoworld.geo.GeoTile;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
@@ -77,8 +78,24 @@ public final class TerrainSurveyScenario {
             // tower (party wall + full-height tower) — a footprint
             // straddling a 5 m slope (one uniform roof), and a 6-floor.
             {1969, -60876}, {1969, -60877}, {2683, -59850}, {2102, -60000},
+            // Building taxonomy (Phase 16): use-specific classes — a
+            // supermarket, a restaurant, a POI-joined fuel station
+            // (node inside a generic footprint), a church, a
+            // school, a hotel, a parking garage.
+            {1428, -60532}, {2176, -59592}, {-1057, -63672}, {3131, -59511},
+            {3406, -59909}, {2134, -60302}, {2222, -60108},
             {5000, 0}, {-5000, -5000},
     };
+
+    /** Expected building class per taxonomy sample — "x,z" -> class id. */
+    private static final Map<String, Integer> TAXONOMY_EXPECTED = Map.of(
+            "1428,-60532", 7,   // supermarket
+            "2176,-59592", 8,   // restaurant
+            "-1057,-63672", 9,  // fuel (POI node join)
+            "3131,-59511", 11,  // church
+            "3406,-59909", 10,  // school
+            "2134,-60302", 13,  // hotel
+            "2222,-60108", 14); // parking
 
     private int warmup = -1;
     private boolean finished;
@@ -329,6 +346,22 @@ public final class TerrainSurveyScenario {
                         pos.set(r.x, wallY, r.z));
                 pass &= check(String.format("building_party_wall_%d_%d", r.x, r.z),
                         palette != null && underRoof == palette.wall());
+            }
+        }
+        // Phase 16: use-specific classes (supermarket, fuel, church, ...)
+        // compiled from building=/POI tags — the taxonomy samples must
+        // carry their expected class and render a shell in its palette.
+        for (ColumnReport r : reports) {
+            Integer expected = TAXONOMY_EXPECTED.get(r.x + "," + r.z);
+            if (expected != null && delegate != null) {
+                var palette = com.evansgisgen.geoworld.worldgen.GeoChunkGenerator
+                        .buildingPalette(expected);
+                pass &= check(String.format("building_taxonomy_%d_%d", r.x, r.z),
+                        r.buildingClass == expected && palette != null
+                                && r.topY >= r.target + 4
+                                && (r.top == palette.roof()
+                                        || r.top == palette.wall()
+                                        || r.top == palette.window()));
             }
         }
         // Overburden seal: full-coverage non-building columns must be solid

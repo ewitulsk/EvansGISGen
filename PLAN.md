@@ -967,6 +967,15 @@ tags on it, so coverage multiplies if we join them.
 (a gas station, a supermarket, a church render distinctly); survey gains a
 `building_class_*` assertion on a known typed building.
 
+**Built**: classes 7–18 (supermarket, restaurant, fuel, school, church,
+hospital, hotel, parking, sports, agricultural, auto, storage) driven by two
+sources: `building=`+use-tags on the way (`_BUILDING_CLASSES` + `_poi_class`)
+and a POI-node join (`fetch-pois` → `pois_all.json`, 3,720 nodes;
+`_join_pois` reclassifies only weak/generic footprints containing a node —
+specific classes like churches are never overridden). Each class gets a
+distinct palette. Survey: `building_taxonomy_*` on seven real Lincoln
+buildings incl. the Super C fuel station joined from its POI node.
+
 ---
 
 ## Phase 17 — Outbuildings: garages and sheds where they belong

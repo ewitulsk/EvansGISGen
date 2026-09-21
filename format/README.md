@@ -110,7 +110,10 @@ Notes:
   `7` parking, `8` railway, `9` park. Semantic land use only — the runtime
   theme maps classes to blocks.
 - `building` class ids: `0` none, `1` residential, `2` commercial,
-  `3` industrial, `4` civic, `5` outbuilding, `6` generic (Phase 8).
+  `3` industrial, `4` civic, `5` outbuilding, `6` generic (Phase 8), plus
+  the Phase 16 use-specific classes — `7` supermarket, `8` restaurant,
+  `9` fuel, `10` school, `11` church, `12` hospital, `13` hotel,
+  `14` parking, `15` sports, `16` agricultural, `17` auto, `18` storage.
   `building_levels` holds the floor count inside footprint cells
   (`building:levels`/`height` tags, else class defaults). The runtime
   extrudes a shell: floor slab, perimeter walls with window banding, roof.

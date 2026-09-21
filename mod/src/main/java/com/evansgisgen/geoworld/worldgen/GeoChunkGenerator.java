@@ -148,6 +148,19 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
     static final int BUILDING_CIVIC = 4;
     static final int BUILDING_OUTBUILDING = 5;
     static final int BUILDING_GENERIC = 6;
+    // Phase 16 taxonomy — use-specific classes from building=/POI tags.
+    static final int BUILDING_SUPERMARKET = 7;
+    static final int BUILDING_RESTAURANT = 8;
+    static final int BUILDING_FUEL = 9;
+    static final int BUILDING_SCHOOL = 10;
+    static final int BUILDING_CHURCH = 11;
+    static final int BUILDING_HOSPITAL = 12;
+    static final int BUILDING_HOTEL = 13;
+    static final int BUILDING_PARKING = 14;
+    static final int BUILDING_SPORTS = 15;
+    static final int BUILDING_AGRICULTURAL = 16;
+    static final int BUILDING_CAR = 17;
+    static final int BUILDING_STORAGE = 18;
 
     /** Wall/floor/roof materials per building class (Phase 8 theme). */
     public record BuildPalette(BlockState wall, BlockState floor,
@@ -183,6 +196,56 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
                     Blocks.DARK_OAK_PLANKS.defaultBlockState(),
                     Blocks.GLASS.defaultBlockState()),
             new BuildPalette(Blocks.BRICKS.defaultBlockState(),            // generic
+                    Blocks.STONE.defaultBlockState(),
+                    Blocks.GRAY_CONCRETE.defaultBlockState(),
+                    Blocks.GLASS.defaultBlockState()),
+            // Phase 16 use-specific palettes — distinct roof/wall accents
+            // make the taxonomy legible from the ground.
+            new BuildPalette(Blocks.WHITE_CONCRETE.defaultBlockState(),    // supermarket
+                    Blocks.STONE.defaultBlockState(),
+                    Blocks.GRAY_CONCRETE.defaultBlockState(),
+                    Blocks.GLASS.defaultBlockState()),
+            new BuildPalette(Blocks.RED_NETHER_BRICKS.defaultBlockState(), // restaurant
+                    Blocks.STONE.defaultBlockState(),
+                    Blocks.DARK_OAK_PLANKS.defaultBlockState(),
+                    Blocks.GLASS.defaultBlockState()),
+            new BuildPalette(Blocks.WHITE_CONCRETE.defaultBlockState(),    // fuel
+                    Blocks.STONE.defaultBlockState(),
+                    Blocks.CYAN_CONCRETE.defaultBlockState(),   // canopy band
+                    Blocks.GLASS.defaultBlockState()),
+            new BuildPalette(Blocks.END_STONE_BRICKS.defaultBlockState(),  // school
+                    Blocks.STONE.defaultBlockState(),
+                    Blocks.GRAY_CONCRETE.defaultBlockState(),
+                    Blocks.GLASS.defaultBlockState()),
+            new BuildPalette(Blocks.SANDSTONE.defaultBlockState(),         // church
+                    Blocks.STONE.defaultBlockState(),
+                    Blocks.DARK_OAK_PLANKS.defaultBlockState(),
+                    Blocks.GLASS.defaultBlockState()),
+            new BuildPalette(Blocks.WHITE_CONCRETE.defaultBlockState(),    // hospital
+                    Blocks.QUARTZ_BLOCK.defaultBlockState(),
+                    Blocks.LIGHT_GRAY_CONCRETE.defaultBlockState(),
+                    Blocks.GLASS.defaultBlockState()),
+            new BuildPalette(Blocks.LIGHT_GRAY_CONCRETE.defaultBlockState(), // hotel
+                    Blocks.QUARTZ_BLOCK.defaultBlockState(),
+                    Blocks.DARK_OAK_PLANKS.defaultBlockState(),
+                    Blocks.GLASS.defaultBlockState()),
+            new BuildPalette(Blocks.GRAY_CONCRETE.defaultBlockState(),     // parking
+                    Blocks.GRAY_CONCRETE.defaultBlockState(),
+                    Blocks.LIGHT_GRAY_CONCRETE.defaultBlockState(),
+                    Blocks.GLASS.defaultBlockState()),
+            new BuildPalette(Blocks.WHITE_CONCRETE.defaultBlockState(),    // sports
+                    Blocks.STONE.defaultBlockState(),
+                    Blocks.GREEN_CONCRETE.defaultBlockState(),
+                    Blocks.GLASS.defaultBlockState()),
+            new BuildPalette(Blocks.RED_TERRACOTTA.defaultBlockState(),    // agricultural
+                    Blocks.DIRT.defaultBlockState(),
+                    Blocks.GRAY_CONCRETE.defaultBlockState(),
+                    Blocks.GLASS.defaultBlockState()),
+            new BuildPalette(Blocks.LIGHT_GRAY_CONCRETE.defaultBlockState(), // car
+                    Blocks.STONE.defaultBlockState(),
+                    Blocks.BLUE_CONCRETE.defaultBlockState(),
+                    Blocks.GLASS.defaultBlockState()),
+            new BuildPalette(Blocks.ORANGE_TERRACOTTA.defaultBlockState(), // storage
                     Blocks.STONE.defaultBlockState(),
                     Blocks.GRAY_CONCRETE.defaultBlockState(),
                     Blocks.GLASS.defaultBlockState()),
@@ -1122,7 +1185,8 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
     public static boolean isFeatureOverhang(BlockState state) {
         return state.canBeReplaced()
                 || state.is(net.minecraft.tags.BlockTags.LEAVES)
-                || state.is(net.minecraft.tags.BlockTags.LOGS);
+                || state.is(net.minecraft.tags.BlockTags.LOGS)
+                || state.is(net.minecraft.tags.BlockTags.FLOWERS);
     }
 
     /**

@@ -60,6 +60,9 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--ms-buildings", default=None,
                    help="Microsoft GlobalML footprint JSON from "
                         "fetch-buildings-ms; merged under OSM as GENERIC")
+    b.add_argument("--pois", default=None,
+                   help="OSM POI node JSON from fetch-pois; reclassifies "
+                        "weak footprints by contained POI (Phase 16)")
     b.add_argument("--bounds", default=None,
                    help="'eMin,nMin,eMax,nMax' dataset rect in geo meters "
                         "(default: +-radius square)")
@@ -113,6 +116,13 @@ def main(argv: list[str] | None = None) -> int:
     fm.add_argument("--bbox", required=True,
                     help="'minLon,minLat,maxLon,maxLat' in WGS84 degrees")
     fm.add_argument("--out", required=True, help="output JSON path")
+
+    fp2 = sub.add_parser("fetch-pois",
+                         help="download OSM POI nodes (amenity/shop/office/"
+                              "tourism/leisure/healthcare/craft) as JSON")
+    fp2.add_argument("--bbox", required=True,
+                     help="'minLon,minLat,maxLon,maxLat' in WGS84 degrees")
+    fp2.add_argument("--out", required=True, help="output JSON path")
 
     fp = sub.add_parser("fetch-parcels",
                         help="paged bbox query against an ArcGIS "
@@ -212,6 +222,14 @@ def main(argv: list[str] | None = None) -> int:
         min_lon, min_lat, max_lon, max_lat = (
             float(s) for s in args.bbox.split(","))
         print(fetch_buildings_ms(min_lon, min_lat, max_lon, max_lat, args.out))
+        return 0
+
+    if args.command == "fetch-pois":
+        from .buildings import fetch_pois
+
+        min_lon, min_lat, max_lon, max_lat = (
+            float(s) for s in args.bbox.split(","))
+        print(fetch_pois(min_lon, min_lat, max_lon, max_lat, args.out))
         return 0
 
     if args.command == "fetch-parcels":
@@ -367,6 +385,7 @@ def main(argv: list[str] | None = None) -> int:
                 buildings = BuildingSource(
                     args.buildings, projection, bounds=sb,
                     ms_json_path=args.ms_buildings,
+                    pois_json_path=args.pois,
                     elev_m=getattr(source, "elevation_m", None),
                     transform=transform)
 

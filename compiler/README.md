@@ -40,6 +40,8 @@ python -m geoworld_compiler build --source dem \
     --landuse ../datasets/raw/landuse_all.json \
     --buildings ../datasets/raw/buildings_all.json \
     --ms-buildings ../datasets/raw/buildings_ms_all.json \
+    --pois ../datasets/raw/pois_all.json \
+    --reclassify-outbuildings \
     --out ../datasets/beatrice.geoworld --name beatrice
 
 # Data fetches (all take --bbox 'minLon,minLat,maxLon,maxLat')
@@ -49,6 +51,7 @@ python -m geoworld_compiler fetch-roads        --bbox ... --out FILE  # OSM high
 python -m geoworld_compiler fetch-landuse      --bbox ... --out FILE  # OSM land use
 python -m geoworld_compiler fetch-buildings    --bbox ... --out FILE  # OSM buildings
 python -m geoworld_compiler fetch-buildings-ms --bbox ... --out FILE  # MS GlobalML
+python -m geoworld_compiler fetch-pois         --bbox ... --out FILE  # OSM POI nodes
 
 # Parcels (Phase 12): ArcGIS parcel layer -> GeoJSON, then into the dataset
 python -m geoworld_compiler fetch-parcels \

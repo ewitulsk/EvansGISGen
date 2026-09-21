@@ -55,6 +55,19 @@ BUILDING_INDUSTRIAL = 3
 BUILDING_CIVIC = 4
 BUILDING_OUTBUILDING = 5
 BUILDING_GENERIC = 6
+# Phase 16 taxonomy — use-specific classes from building=*/POI tags.
+BUILDING_SUPERMARKET = 7
+BUILDING_RESTAURANT = 8
+BUILDING_FUEL = 9
+BUILDING_SCHOOL = 10
+BUILDING_CHURCH = 11
+BUILDING_HOSPITAL = 12
+BUILDING_HOTEL = 13
+BUILDING_PARKING = 14
+BUILDING_SPORTS = 15
+BUILDING_AGRICULTURAL = 16
+BUILDING_CAR = 17
+BUILDING_STORAGE = 18
 
 # Paint priorities: ascending draw order — highest wins per cell. MS
 # footprints (5) sit under every OSM class; building=roof shells (3) sit
@@ -64,8 +77,8 @@ _PRIO_ROOF_SHELL = 3
 
 # building=* value -> (class, default levels, paint priority).
 _BUILDING_CLASSES: list[tuple[frozenset[str], int, int, int]] = [
-    (frozenset({"garage", "garages", "shed", "barn", "outbuilding",
-                "carport", "hut", "storage_tank", "silo"}),
+    (frozenset({"garage", "garages", "shed", "outbuilding", "carport",
+                "hut", "storage_tank", "silo"}),
      BUILDING_OUTBUILDING, 1, 10),
     (frozenset({"house", "detached", "residential", "apartments", "terrace",
                 "dormitory", "cabin", "bungalow", "semidetached_house",
@@ -73,15 +86,70 @@ _BUILDING_CLASSES: list[tuple[frozenset[str], int, int, int]] = [
      BUILDING_RESIDENTIAL, 2, 20),
     (frozenset({"industrial", "warehouse", "manufacture"}),
      BUILDING_INDUSTRIAL, 2, 30),
-    (frozenset({"retail", "commercial", "office", "supermarket", "shop",
-                "mall", "kiosk", "restaurant", "hotel"}),
+    (frozenset({"retail", "commercial", "office", "shop", "kiosk"}),
      BUILDING_COMMERCIAL, 3, 40),
-    (frozenset({"school", "church", "hospital", "civic", "public", "college",
-                "university", "kindergarten", "government", "cathedral",
-                "chapel", "fire_station"}),
+    (frozenset({"supermarket", "mall", "big_box"}),
+     BUILDING_SUPERMARKET, 1, 42),
+    (frozenset({"restaurant"}), BUILDING_RESTAURANT, 1, 42),
+    (frozenset({"hotel"}), BUILDING_HOTEL, 4, 42),
+    (frozenset({"parking"}), BUILDING_PARKING, 3, 42),
+    (frozenset({"stadium", "grandstand", "sports_hall", "sports_centre"}),
+     BUILDING_SPORTS, 2, 42),
+    (frozenset({"barn", "farm_auxiliary", "stable", "cowshed", "sty",
+                "greenhouse"}),
+     BUILDING_AGRICULTURAL, 1, 42),
+    (frozenset({"storage"}), BUILDING_STORAGE, 1, 42),
+    (frozenset({"school", "college", "university", "kindergarten"}),
+     BUILDING_SCHOOL, 2, 45),
+    (frozenset({"church", "cathedral", "chapel", "religious"}),
+     BUILDING_CHURCH, 2, 45),
+    (frozenset({"hospital"}), BUILDING_HOSPITAL, 4, 45),
+    (frozenset({"civic", "public", "government", "fire_station",
+                "train_station", "transportation"}),
      BUILDING_CIVIC, 3, 50),
 ]
 _GENERIC = (BUILDING_GENERIC, 2, 15)
+
+# Use-specific tags on the way itself outrank a generic building= value:
+# building=yes + amenity=restaurant is a restaurant, not a generic box.
+# (tag key, value set) -> (class, default levels). Same table drives the
+# POI-node join — a node inside a weak footprint reclassifies it.
+_POI_TAG_CLASSES: list[tuple[str, frozenset[str], int, int]] = [
+    ("amenity", frozenset({"fuel", "charging_station"}), BUILDING_FUEL, 1),
+    ("amenity", frozenset({"hospital", "clinic"}), BUILDING_HOSPITAL, 4),
+    ("amenity", frozenset({"doctors", "dentist", "pharmacy", "veterinary"}),
+     BUILDING_HOSPITAL, 1),
+    ("healthcare", frozenset({"hospital", "clinic", "centre"}),
+     BUILDING_HOSPITAL, 3),
+    ("amenity", frozenset({"restaurant", "fast_food", "cafe", "bar", "pub",
+                           "food_court", "ice_cream", "biergarten"}),
+     BUILDING_RESTAURANT, 1),
+    ("amenity", frozenset({"school", "college", "university", "kindergarten",
+                           "driving_school", "music_school"}),
+     BUILDING_SCHOOL, 2),
+    ("amenity", frozenset({"place_of_worship"}), BUILDING_CHURCH, 2),
+    ("amenity", frozenset({"parking"}), BUILDING_PARKING, 3),
+    ("amenity", frozenset({"car_wash", "car_rental", "vehicle_inspection"}),
+     BUILDING_CAR, 1),
+    ("shop", frozenset({"supermarket", "department_store", "mall",
+                        "wholesale", "hypermarket"}),
+     BUILDING_SUPERMARKET, 1),
+    ("shop", frozenset({"car", "car_repair", "car_parts", "tyres",
+                        "motorcycle"}), BUILDING_CAR, 1),
+    ("shop", frozenset({"storage_rental"}), BUILDING_STORAGE, 1),
+    ("tourism", frozenset({"hotel", "motel", "hostel", "guest_house"}),
+     BUILDING_HOTEL, 4),
+    ("leisure", frozenset({"sports_centre", "stadium", "fitness_centre",
+                           "golf_course", "bowling_alley", "ice_rink"}),
+     BUILDING_SPORTS, 2),
+    ("healthcare", frozenset({"doctor", "dentist", "pharmacy"}),
+     BUILDING_HOSPITAL, 1),
+]
+
+# Classes a POI node may reclassify — generic/weak classifications lose to
+# a real use tag; specific ones (a church, a garage) stand.
+_POI_UPGRADABLE = frozenset({BUILDING_GENERIC, BUILDING_COMMERCIAL,
+                             BUILDING_RESIDENTIAL, BUILDING_INDUSTRIAL})
 
 # Spacing (m) of the DEM sample grid used to find each instance's highest
 # ground. The pad sits at the bbox maximum so no footprint cell buries its
@@ -99,6 +167,38 @@ out geom;"""
     req = urllib.request.Request(OVERPASS, data=body,
                                  headers={"User-Agent": "geoworld-compiler/0.1"})
     with urllib.request.urlopen(req, timeout=180) as resp:
+        data = json.load(resp)
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(data))
+    return out
+
+
+def fetch_pois(min_lon: float, min_lat: float, max_lon: float,
+               max_lat: float, out_path: str | Path) -> Path:
+    """Download OSM POI nodes (amenity/shop/office/tourism/leisure/
+    healthcare/craft) in a WGS84 bbox as raw JSON.
+
+    Most real-world use tags live on *nodes inside* the building
+    footprint rather than on the way — the node query is what lets the
+    compiler reclassify a generic footprint as the restaurant or fuel
+    station it actually is (Phase 16).
+    """
+    query = f"""[out:json][timeout:180];
+(
+node["amenity"]({min_lat},{min_lon},{max_lat},{max_lon});
+node["shop"]({min_lat},{min_lon},{max_lat},{max_lon});
+node["office"]({min_lat},{min_lon},{max_lat},{max_lon});
+node["tourism"]({min_lat},{min_lon},{max_lat},{max_lon});
+node["leisure"]({min_lat},{min_lon},{max_lat},{max_lon});
+node["healthcare"]({min_lat},{min_lon},{max_lat},{max_lon});
+node["craft"]({min_lat},{min_lon},{max_lat},{max_lon});
+);
+out body;"""
+    body = urllib.parse.urlencode({"data": query}).encode()
+    req = urllib.request.Request(OVERPASS, data=body,
+                                 headers={"User-Agent": "geoworld-compiler/0.1"})
+    with urllib.request.urlopen(req, timeout=240) as resp:
         data = json.load(resp)
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -173,6 +273,21 @@ def fetch_buildings_ms(min_lon: float, min_lat: float, max_lon: float,
     return out
 
 
+def _poi_class(tags: dict) -> tuple[int, int, int] | None:
+    """(class, default levels, rule rank) from use-specific tags, or None.
+
+    The rank is the matched rule's position — when several POIs land in
+    one weak footprint, the lowest-ranked (most specific) rule wins.
+    """
+    for i, (key, values, cls, levels) in enumerate(_POI_TAG_CLASSES):
+        if tags.get(key) in values:
+            return cls, levels, i
+    # Bare shop/office tags are commercial use without a finer reading.
+    if "shop" in tags or "office" in tags or "craft" in tags:
+        return BUILDING_COMMERCIAL, 1, len(_POI_TAG_CLASSES)
+    return None
+
+
 def _classify(tags: dict) -> tuple[int, int, int]:
     """(class, levels, priority) for a building way."""
     cls, default_levels, prio = _GENERIC
@@ -181,6 +296,13 @@ def _classify(tags: dict) -> tuple[int, int, int]:
         if value in values:
             cls, default_levels, prio = c, lv, p
             break
+    # Use-specific tags (amenity/shop/...) outrank a weak building= read:
+    # a building=yes carrying amenity=restaurant is a restaurant. They do
+    # not override a specific building= value (a church stays a church).
+    poi = _poi_class(tags)
+    if poi is not None and cls in _POI_UPGRADABLE:
+        cls, default_levels = poi[0], poi[1]
+        prio = max(prio, 42)
     levels = default_levels
     try:
         if "building:levels" in tags:
@@ -205,6 +327,88 @@ def _instance_id(coords: list[tuple[float, float]]) -> int:
     return 1 + ((h & 0x7FFFFFFF) % 65535)
 
 
+def _ring_area(coords: list[tuple[float, float]]) -> float:
+    """Signed-ring (shoelace) area of a polygon in geo meters."""
+    a = 0.0
+    for (x0, y0), (x1, y1) in zip(coords, coords[1:]):
+        a += x0 * y1 - x1 * y0
+    return abs(a) * 0.5
+
+
+def _point_in_ring(ring: list[tuple[float, float]],
+                   east: float, north: float) -> bool:
+    """Even-odd ray cast: is geo point (east, north) inside the ring?"""
+    inside = False
+    j = len(ring) - 1
+    for i in range(len(ring)):
+        xi, yi = ring[i]
+        xj, yj = ring[j]
+        if ((yi > north) != (yj > north)) and (
+                east < (xj - xi) * (north - yi) / (yj - yi) + xi):
+            inside = not inside
+        j = i
+    return inside
+
+
+def _bbox_grid(polys: list[tuple[int, int, int, tuple, dict]],
+               cell_m: float = 128.0
+               ) -> dict[tuple[int, int], list[int]]:
+    """Polygon indices bucketed by the grid cells their bbox overlaps —
+    cheap spatial index for point/neighborhood lookups."""
+    grid: dict[tuple[int, int], list[int]] = {}
+    for i, (_prio, _cls, _lv, bbox, _g) in enumerate(polys):
+        ce0, cn0 = int(bbox[0] // cell_m), int(bbox[1] // cell_m)
+        ce1, cn1 = int(bbox[2] // cell_m), int(bbox[3] // cell_m)
+        for ce in range(ce0, ce1 + 1):
+            for cn in range(cn0, cn1 + 1):
+                grid.setdefault((ce, cn), []).append(i)
+    return grid
+
+
+def _join_pois(pois_json_path: str | Path, projection: Projection,
+               polys: list[tuple[int, int, int, tuple, dict]]) -> None:
+    """Reclassify weak footprints by the POI nodes inside them (Phase 16).
+
+    A `shop=supermarket` node inside a generic footprint makes it a
+    supermarket. Every containing weak polygon upgrades (MS + OSM
+    duplicates of the same building both qualify); a polygon keeps the
+    class of its highest-ranked POI rule, and specific classifications
+    (a church, a garage) are never overridden.
+    """
+    data = json.loads(Path(pois_json_path).read_text())
+    pois = []
+    for el in data.get("elements", []):
+        if el.get("type") != "node":
+            continue
+        hit = _poi_class(el.get("tags", {}))
+        if hit is None:
+            continue
+        cls, _lv, rank = hit
+        east, north = projection.to_geo(el["lat"], el["lon"])
+        pois.append((rank, cls, east, north))
+    if not pois:
+        return
+    pois.sort(key=lambda p: p[0])  # most specific rule first
+
+    # Grid index over polygon bboxes for cheap candidate lookup.
+    cell_m = 128.0
+    grid = _bbox_grid(polys, cell_m)
+
+    claimed: set[int] = set()
+    for _rank, cls, east, north in pois:
+        for i in grid.get((int(east // cell_m), int(north // cell_m)), ()):
+            if i in claimed:
+                continue
+            prio, pcls, plv, bbox, g = polys[i]
+            if (pcls not in _POI_UPGRADABLE
+                    or not (bbox[0] <= east <= bbox[2]
+                            and bbox[1] <= north <= bbox[3])):
+                continue
+            if _point_in_ring(g["coordinates"][0], east, north):
+                polys[i] = (prio, cls, plv, bbox, g)
+                claimed.add(i)
+
+
 class BuildingSource:
     """Per-cell building class + floor count from merged footprints.
 
@@ -225,6 +429,7 @@ class BuildingSource:
                  bounds: tuple[float, float, float, float],
                  resolution_m: float = 1.0,
                  ms_json_path: str | Path | None = None,
+                 pois_json_path: str | Path | None = None,
                  elev_m=None, transform: GeoTransform | None = None):
         if osm_json_path is None and ms_json_path is None:
             raise ValueError("BuildingSource needs at least one input")
@@ -281,6 +486,9 @@ class BuildingSource:
                     prio = _PRIO_ROOF_SHELL
                 coords = [projection.to_geo(p["lat"], p["lon"]) for p in geom]
                 add(coords, cls, levels, prio)
+
+        if pois_json_path is not None:
+            _join_pois(pois_json_path, projection, polys)
 
         polys.sort(key=lambda p: p[0])
 

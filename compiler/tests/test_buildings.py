@@ -5,8 +5,10 @@ import json
 import pytest
 
 from geoworld_compiler.buildings import (
-    BUILDING_CIVIC, BUILDING_GENERIC, BUILDING_INDUSTRIAL, BUILDING_NONE,
-    BUILDING_OUTBUILDING, BUILDING_RESIDENTIAL, BuildingSource,
+    BUILDING_CHURCH, BUILDING_CIVIC, BUILDING_FUEL, BUILDING_GENERIC,
+    BUILDING_INDUSTRIAL, BUILDING_NONE, BUILDING_OUTBUILDING,
+    BUILDING_RESIDENTIAL, BUILDING_RESTAURANT, BUILDING_SCHOOL,
+    BUILDING_SUPERMARKET, BuildingSource,
 )
 from geoworld_compiler.transform import Projection
 
@@ -55,7 +57,7 @@ def test_class_and_default_levels(tmp_path, projection):
     assert src.building_class(0.0, 0.0) == BUILDING_RESIDENTIAL
     assert src.building_levels(0.0, 0.0) == 2
     assert src.building_class(60.0, 0.0) == BUILDING_INDUSTRIAL
-    assert src.building_class(0.0, 60.0) == BUILDING_CIVIC
+    assert src.building_class(0.0, 60.0) == BUILDING_SCHOOL
     assert src.building_class(60.0, 60.0) == BUILDING_OUTBUILDING
     assert src.building_levels(60.0, 60.0) == 1
     assert src.building_class(-60.0, 0.0) == BUILDING_GENERIC
@@ -124,7 +126,7 @@ def test_osm_overrides_ms(tmp_path, projection):
     ])
     ms = _ms(tmp_path, [(_poly(0.0, 0.0, 12.0), -1.0)])
     src = BuildingSource(osm, projection, bounds=(-200.0, -200.0, 200.0, 200.0), ms_json_path=ms)
-    assert src.building_class(0.0, 0.0) == BUILDING_CIVIC
+    assert src.building_class(0.0, 0.0) == BUILDING_SCHOOL
     assert src.building_levels(0.0, 0.0) == 4
     # MS polygon sticks out past the OSM one: residue stays GENERIC.
     assert src.building_class(11.0, 0.0) == BUILDING_GENERIC
@@ -197,3 +199,60 @@ def test_roof_shell_does_not_donut_ms(tmp_path, projection):
                          bounds=(-200.0, -200.0, 200.0, 200.0),
                          ms_json_path=ms)
     assert src.building_class(0.0, 0.0) == BUILDING_GENERIC
+
+
+def _node(el_id, tags, east, north):
+    """POI node at geo (east, north) meters relative to the anchor."""
+    import pyproj
+    proj = Projection(CRS, *ANCHOR)
+    inv = pyproj.Transformer.from_crs(CRS, "EPSG:4326", always_xy=True)
+    lon, lat = inv.transform(east + proj.anchor_east,
+                             north + proj.anchor_north)
+    return {"type": "node", "id": el_id, "tags": tags,
+            "lat": lat, "lon": lon}
+
+
+def _pois(tmp_path, nodes):
+    p = tmp_path / "pois.json"
+    p.write_text(json.dumps({"elements": nodes}))
+    return p
+
+
+def test_use_tags_reclassify(tmp_path, projection):
+    # Phase 16: amenity/shop on the way outranks a weak building= value.
+    path = _write(tmp_path, [
+        _way(1, {"building": "yes", "amenity": "restaurant"},
+             _poly(0.0, 0.0, 10.0)),
+        _way(2, {"building": "yes", "shop": "supermarket"},
+             _poly(60.0, 0.0, 15.0)),
+        _way(3, {"building": "church", "amenity": "restaurant"},
+             _poly(0.0, 60.0, 15.0)),
+        _way(4, {"building": "yes", "amenity": "fuel"},
+             _poly(60.0, 60.0, 8.0)),
+    ])
+    src = BuildingSource(path, projection, bounds=(-200.0, -200.0, 200.0, 200.0))
+    assert src.building_class(0.0, 0.0) == BUILDING_RESTAURANT
+    assert src.building_class(60.0, 0.0) == BUILDING_SUPERMARKET
+    # building=church is a specific value — amenity does not override it.
+    assert src.building_class(0.0, 60.0) == BUILDING_CHURCH
+    assert src.building_class(60.0, 60.0) == BUILDING_FUEL
+
+
+def test_poi_node_join(tmp_path, projection):
+    # Phase 16: a POI node inside a weak footprint reclassifies it.
+    osm = _write(tmp_path, [
+        _way(1, {"building": "yes"}, _poly(0.0, 0.0, 15.0)),
+        _way(2, {"building": "house"}, _poly(60.0, 0.0, 15.0)),
+        _way(3, {"building": "church"}, _poly(0.0, 60.0, 15.0)),
+    ])
+    pois = _pois(tmp_path, [
+        _node(1, {"amenity": "fuel"}, 0.0, 0.0),
+        _node(2, {"amenity": "restaurant"}, 60.0, 0.0),
+        _node(3, {"amenity": "restaurant"}, 0.0, 60.0),
+    ])
+    src = BuildingSource(osm, projection, bounds=(-200.0, -200.0, 200.0, 200.0),
+                         pois_json_path=pois)
+    assert src.building_class(0.0, 0.0) == BUILDING_FUEL
+    assert src.building_class(60.0, 0.0) == BUILDING_RESTAURANT
+    # A church is a specific classification — the POI cannot override it.
+    assert src.building_class(0.0, 60.0) == BUILDING_CHURCH
