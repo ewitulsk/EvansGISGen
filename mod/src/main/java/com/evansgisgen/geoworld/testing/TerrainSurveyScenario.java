@@ -300,7 +300,7 @@ public final class TerrainSurveyScenario {
                     && r.waterDepth == 0 && r.roadClass == 0 && !r.landmark
                     && r.deckY == GeoTile.NO_DATA) {
                 var palette = com.evansgisgen.geoworld.worldgen.GeoChunkGenerator
-                        .buildingPalette(r.buildingClass);
+                        .buildingPalette(r.buildingClass, r.buildingId);
                 pass &= check(String.format("building_shell_%d_%d", r.x, r.z),
                         palette != null && r.topY >= r.target + 4
                                 && (r.top == palette.roof() || r.top == palette.wall()
@@ -308,17 +308,21 @@ public final class TerrainSurveyScenario {
             }
         }
         // Phase 15: a compiled roof height means one roof baseline per
-        // instance — the world's top block sits at that Y, not stepped
-        // with the terrain (the sloped-footprint samples prove it).
+        // instance — the world's top block sits at that Y (flat classes)
+        // or the gable cap just above it (pitched classes, Phase 18), not
+        // stepped with the terrain (the sloped-footprint samples prove it).
         for (ColumnReport r : reports) {
             if (r.buildingClass > 0 && r.buildingRoof != GeoTile.NO_DATA
                     && r.weight >= 0.98 && delegate != null
                     && r.waterDepth == 0 && r.roadClass == 0 && !r.landmark
                     && r.deckY == GeoTile.NO_DATA) {
                 var palette = com.evansgisgen.geoworld.worldgen.GeoChunkGenerator
-                        .buildingPalette(r.buildingClass);
+                        .buildingPalette(r.buildingClass, r.buildingId);
                 pass &= check(String.format("building_uniform_roof_%d_%d", r.x, r.z),
-                        palette != null && r.topY == r.buildingRoof
+                        palette != null && r.topY >= r.buildingRoof
+                                && r.topY <= r.buildingRoof
+                                        + com.evansgisgen.geoworld.worldgen
+                                                .GeoChunkGenerator.GABLE_MAX_RISE
                                 && r.top == palette.roof());
             }
         }
@@ -337,9 +341,10 @@ public final class TerrainSurveyScenario {
                     continue;
                 }
                 var palette = com.evansgisgen.geoworld.worldgen.GeoChunkGenerator
-                        .buildingPalette(r.buildingClass);
+                        .buildingPalette(r.buildingClass, r.buildingId);
                 BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
-                // The solid wall row just under the roof slab.
+                // The solid wall row just under the roof baseline (the
+                // gable cap sits above it on pitched classes).
                 int wallY = (r.buildingRoof != GeoTile.NO_DATA
                         ? r.buildingRoof : r.topY) - 1;
                 BlockState underRoof = level.getBlockState(

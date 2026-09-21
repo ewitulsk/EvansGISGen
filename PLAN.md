@@ -1025,6 +1025,16 @@ current fetch).
 **Definition of done:** two neighboring houses differ in facade; a pitched roof
 assertion in survey; all prior checks stay green.
 
+**Built**: runtime-only — no dataset rebuild. `variantPalette(cls, id)` seeds
+facade variants off `building_id` (residential + outbuilding palettes), and
+house-scale classes (`GABLE_CLASSES`: residential, outbuilding, agricultural,
+church) get pitched caps above the flat roof baseline: `id % 3` picks
+gable-N-S / gable-E-W / hip, with rise = `min(eave/2, 6)` where eave is the
+distance to the footprint edge via `scanIdDistance` (reads `building_id` from
+the dataset, so caps are deterministic across chunk boundaries). Survey's
+roof assertions accept the baseline plus `GABLE_MAX_RISE`. Survey PASS,
+no FAILs.
+
 ---
 
 ## Runtime Architecture

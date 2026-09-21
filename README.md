@@ -13,7 +13,7 @@ dataset). See [PLAN.md](PLAN.md) for the full implementation plan.
 └── format/     # dataset format spec
 ```
 
-## Current status: Phase 13
+## Current status: Phase 18
 
 - `GeoChunkGenerator` wraps a vanilla `ChunkGenerator` (`geoworld:geoworld`)
   and delegates everything to it, then deforms terrain from geographic data:
@@ -88,20 +88,27 @@ dataset). See [PLAN.md](PLAN.md) for the full implementation plan.
   biome noise while a dataset is loaded, killing seed-random jungles and
   frozen rivers (biomes are resolved lazily because the overworld's
   parameter list is unbound during preset decode).
-- Buildings (Phase 8): two sources merged at the raster level.
+- Buildings (Phases 8, 15–18): two sources merged at the raster level.
   `fetch-buildings` pulls OSM `building` footprints (real classes);
   `fetch-buildings-ms` pulls Microsoft GlobalML footprints for the
   quadkey tiles covering the bbox — OSM coverage is sparse in small-town
-  Nebraska (1,665 footprints), so ML detections fill in the rest (7,916
-  footprints, most with height estimates). `buildings.py` paints MS
+  Nebraska, so ML detections fill in the rest. `buildings.py` paints MS
   footprints first at the lowest priority as GENERIC, then OSM classes
-  overwrite them wherever both cover a cell. Output: a building class
-  layer (`0x40`: residential/commercial/industrial/civic/outbuilding/
-  generic) plus `building_levels` (`0x80`: OSM `building:levels`, MS
-  `height`/3, or a per-class default). The runtime extrudes deterministic
-  shells — floor at terrain, walls to `terrain + levels*4`, a window band
-  on the second level, flat roof — respecting roads and water, and clearing
-  vegetation/canopy overhang above roofs.
+  overwrite them wherever both cover a cell. Layers: building class
+  (`0x40`), `building_levels` (`0x80`), `building_id` (`0x400` — a
+  per-footprint instance id), and `building_roof` (`0x800` — one uniform
+  roof height per instance solved from the DEM, so buildings on slopes
+  get connected flat roofs and towers render full height). The runtime
+  walls between *different ids* (party walls between row buildings),
+  extrudes `base = roof − levels·3 − 1` → `roof`, and respects roads and
+  water. Phase 16 adds 12 semantic classes (supermarket, restaurant,
+  fuel, school, church, hospital, hotel, parking, sports, agricultural,
+  auto, storage) from `building=`/use tags plus a `fetch-pois` node join
+  that reclassifies weak footprints containing a POI. Phase 17's
+  `--reclassify-outbuildings` recovers garages/sheds: small MS-only
+  footprints near residences become outbuildings (no garage doors).
+  Phase 18 seeds facade variants and pitched gable/hip roof caps off the
+  instance id for house-scale classes.
 - Landmarks (Phase 9): `landmarks.json` in the dataset declares curated
   structures (id, `landmarks/*.nbt` template, geo position, template-space
   anchor, rotation, terrain policy, optional `replaces_building`).

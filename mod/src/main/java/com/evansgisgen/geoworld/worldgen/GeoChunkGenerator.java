@@ -10,6 +10,7 @@ import com.mojang.serialization.MapCodec;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Holder;
@@ -250,6 +251,56 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
                     Blocks.GRAY_CONCRETE.defaultBlockState(),
                     Blocks.GLASS.defaultBlockState()),
     };
+
+    // Phase 18 facade variety — deterministic per-instance variants seeded
+    // by buildingId. Roofs/floors stay constant per class so surveys and
+    // silhouettes stay consistent; only the walls (facade) change.
+    private static final BuildPalette[] RESIDENTIAL_VARIANTS = {
+            new BuildPalette(Blocks.BRICKS.defaultBlockState(),            // brick
+                    Blocks.OAK_PLANKS.defaultBlockState(),
+                    Blocks.DARK_OAK_PLANKS.defaultBlockState(),
+                    Blocks.GLASS.defaultBlockState()),
+            new BuildPalette(Blocks.WHITE_CONCRETE.defaultBlockState(),    // siding
+                    Blocks.OAK_PLANKS.defaultBlockState(),
+                    Blocks.DARK_OAK_PLANKS.defaultBlockState(),
+                    Blocks.GLASS.defaultBlockState()),
+            new BuildPalette(Blocks.END_STONE_BRICKS.defaultBlockState(),  // blonde brick
+                    Blocks.OAK_PLANKS.defaultBlockState(),
+                    Blocks.DARK_OAK_PLANKS.defaultBlockState(),
+                    Blocks.GLASS.defaultBlockState()),
+    };
+
+    private static final BuildPalette[] OUTBUILDING_VARIANTS = {
+            new BuildPalette(Blocks.COBBLESTONE.defaultBlockState(),       // stone shed
+                    Blocks.DIRT.defaultBlockState(),
+                    Blocks.DARK_OAK_PLANKS.defaultBlockState(),
+                    Blocks.GLASS.defaultBlockState()),
+            new BuildPalette(Blocks.OAK_PLANKS.defaultBlockState(),        // wood shed
+                    Blocks.DIRT.defaultBlockState(),
+                    Blocks.DARK_OAK_PLANKS.defaultBlockState(),
+                    Blocks.GLASS.defaultBlockState()),
+            new BuildPalette(Blocks.STONE.defaultBlockState(),             // plain
+                    Blocks.DIRT.defaultBlockState(),
+                    Blocks.DARK_OAK_PLANKS.defaultBlockState(),
+                    Blocks.GLASS.defaultBlockState()),
+    };
+
+    /**
+     * Palette for a building class + instance (Phase 18): residential and
+     * outbuilding classes pick a deterministic facade variant seeded by
+     * the footprint id; everything else uses the class palette.
+     */
+    @Nullable
+    public static BuildPalette buildingPalette(int buildingClass, int buildingId) {
+        BuildPalette[] variants = buildingClass == BUILDING_RESIDENTIAL
+                ? RESIDENTIAL_VARIANTS
+                : buildingClass == BUILDING_OUTBUILDING
+                        ? OUTBUILDING_VARIANTS : null;
+        if (variants != null && buildingId != 0) {
+            return variants[Math.floorMod(buildingId, variants.length)];
+        }
+        return buildingPalette(buildingClass);
+    }
 
     private final NoiseBasedChunkGenerator delegate;
     private final GeoDataset dataset;
@@ -825,7 +876,7 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
                     continue;
                 }
                 int id = tile.buildingId(tlx, tlz);
-                BuildPalette palette = buildingPalette(cls);
+                BuildPalette palette = buildingPalette(cls, id);
                 int levels = Math.max(1, tile.buildingLevels(tlx, tlz));
                 // Phase 15: one roof height per instance, solved by the
                 // compiler from the footprint's highest ground. On slopes
@@ -892,7 +943,28 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
                         }
                     }
                 }
-                chunk.setBlockState(pos.set(x, roof, z), palette.roof(), false);
+                // Phase 18: pitched caps on house-scale classes. Gables
+                // rise half a block per meter of distance from the nearer
+                // eave along the ridge's perpendicular axis; hips take
+                // the minimum of all four directions (a tent). The shape
+                // is seeded by the instance id.
+                int cap = 0;
+                if (id != 0 && GABLE_CLASSES.contains(cls)) {
+                    int dE = scanIdDistance(x, z, 1, 0, id);
+                    int dW = scanIdDistance(x, z, -1, 0, id);
+                    int dN = scanIdDistance(x, z, 0, -1, id);
+                    int dS = scanIdDistance(x, z, 0, 1, id);
+                    int eave = switch (Math.floorMod(id, 3)) {
+                        case 0 -> Math.min(dE, dW);   // gable, ridge N-S
+                        case 1 -> Math.min(dN, dS);   // gable, ridge E-W
+                        default -> Math.min(Math.min(dE, dW),
+                                Math.min(dN, dS));    // hip (tent)
+                    };
+                    cap = Math.min(eave / GABLE_RISE_DIV, GABLE_MAX_RISE);
+                }
+                for (int y = roof; y <= roof + cap && y <= topY; y++) {
+                    chunk.setBlockState(pos.set(x, y, z), palette.roof(), false);
+                }
                 modified = true;
             }
         }
@@ -903,6 +975,30 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
 
     /** Chance of a tree per forest column — sparse grove density. */
     private static final int FOREST_TREE_DENOMINATOR = 28;
+
+    /** House-scale classes that get pitched gable caps (Phase 18). */
+    private static final Set<Integer> GABLE_CLASSES = Set.of(
+            BUILDING_RESIDENTIAL, BUILDING_OUTBUILDING,
+            BUILDING_AGRICULTURAL, BUILDING_CHURCH);
+    /** Blocks of cap rise per block of eave distance (a ~27° gable). */
+    private static final int GABLE_RISE_DIV = 2;
+    /** Max cap rise above the flat baseline — read by the survey. */
+    public static final int GABLE_MAX_RISE = 6;
+    private static final int GABLE_SCAN_LIMIT = 48;
+
+    /**
+     * Steps from (x, z) toward (dx, dz) until a cell whose building id
+     * differs — the distance to the nearer eave of this footprint's gable
+     * profile. Capped at {@link #GABLE_SCAN_LIMIT}.
+     */
+    private int scanIdDistance(int x, int z, int dx, int dz, int id) {
+        for (int d = 1; d <= GABLE_SCAN_LIMIT; d++) {
+            if (dataset.buildingIdAt(x + dx * d, z + dz * d) != id) {
+                return d;
+            }
+        }
+        return GABLE_SCAN_LIMIT;
+    }
 
     /**
      * Plants deterministic oak trees on FOREST-classified columns (Phase 7).
