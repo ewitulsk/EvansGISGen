@@ -22,7 +22,7 @@ from pathlib import Path
 
 from . import nbtwrite
 from .interiors import (ZONE_CART_STORAGE, ZONE_CHECKOUT, ZONE_GENERAL,
-                        ZONE_GROCERY, ZONE_SELF_CHECKOUT, supports_layout)
+                        ZONE_GROCERY, ZONE_SELF_CHECKOUT)
 from .interiors import _frame  # shared entrance-anchored frame
 
 
@@ -144,10 +144,13 @@ def _runs(mask, lo, hi, min_len):
 
 
 def module_placements(buildings) -> list[dict]:
-    """Module placements for every layout-bearing business instance."""
+    """Module placements for layout-bearing business instances.
+
+    v1: only supercenter_v1 interiors get authored modules — restaurant
+    zones paint floors but no furniture yet."""
     out = []
     for inst in buildings.instances:
-        if not supports_layout(inst.get("layout")):
+        if inst.get("layout") != "supercenter_v1":
             continue
         (ex, ey), (fx, fy), (lx, ly), depth_max, lat_min, lat_max = \
             _frame(inst)

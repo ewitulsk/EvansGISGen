@@ -198,3 +198,95 @@ def test_entrance_prefers_access_side(tmp_path, projection):
     # East edge midpoint has lower access distance than the others.
     east_e, _ = projection.to_geo(40.2702, -96.7494)
     assert ex > east_e - 1.0
+
+
+# --- Phase 22: playability assertions + second-business stress test ---
+
+def _zone_grid(src, inst):
+    """Rasterize interior zones over the footprint bbox at 1m cells."""
+    x0, z0, x1, z1 = inst["bbox"]
+    cells = {}
+    for e in range(int(x0) - 1, int(x1) + 2):
+        for n in range(int(z0) - 1, int(z1) + 2):
+            z = src.interior_zone(e, n)
+            if z:
+                cells[(e, n)] = z
+    return cells
+
+
+def _flood(cells, seed):
+    seen = {seed}
+    stack = [seed]
+    while stack:
+        e, n = stack.pop()
+        for d in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            q = (e + d[0], n + d[1])
+            if q in cells and q not in seen:
+                seen.add(q)
+                stack.append(q)
+    return seen
+
+
+def test_every_zone_cell_reachable_from_entrance(tmp_path, projection):
+    # Playability: zones are paint (v1 has no interior walls), so the
+    # whole zoned raster must be one 4-connected area touching the door.
+    ring = WM_RING
+    def access(e, n):
+        east_e, _ = projection.to_geo(40.270, -96.7494)
+        return e >= east_e + 30
+    osm = _write(tmp_path, "b.json", {"elements": [
+        _way(593154777, ring,
+             {"building": "retail", "brand": "Walmart"})]})
+    src = BuildingSource(osm, projection, bounds=(-500, -500, 500, 500),
+                         access=access)
+    inst = src.instances[0]
+    cells = _zone_grid(src, inst)
+    assert len(cells) > 500
+    # Entrance cell itself must be zoned (vestibule at the door).
+    ex, ey = inst["entrance"]
+    seed = (round(ex), round(ey))
+    if seed not in cells:  # entrance can sit just off the ring centroid
+        seed = min(cells, key=lambda c: (c[0] - ex) ** 2 + (c[1] - ey) ** 2)
+    reached = _flood(cells, seed)
+    assert reached == set(cells)
+    # And the departments we promised actually exist.
+    present = set(cells.values())
+    assert {1, 2, 4, 5, 9} <= present   # vestibule, checkout, grocery, GM, backroom
+
+
+def test_mcdonalds_restaurant_zones_no_modules(tmp_path, projection):
+    # Second business: McDonald's exercises the restaurant layout and a
+    # different palette — and must NOT inherit Walmart's shelf modules.
+    ring = [(-96.752, 40.272), (-96.7517, 40.272), (-96.7517, 40.2722),
+            (-96.752, 40.2722), (-96.752, 40.272)]
+    def access(e, n):
+        east_e, _ = projection.to_geo(40.272, -96.7517)
+        return e >= east_e + 20
+    osm = _write(tmp_path, "b.json", {"elements": [
+        _way(8801, ring, {"building": "yes", "brand": "McDonald's",
+                          "amenity": "fast_food"})]})
+    src = BuildingSource(osm, projection, bounds=(-500, -500, 500, 500),
+                         access=access)
+    inst = [i for i in src.instances if i["business"] == "mcdonalds"]
+    assert len(inst) == 1
+    inst = inst[0]
+    assert inst["layout"] == "restaurant_v1"
+    doc = src.businesses_doc()
+    assert doc["businesses"]["mcdonalds"]["palette"]["accent"] == \
+        "yellow_concrete"
+    # Vestibule at the door, backroom at the far wall.
+    ex, ey = inst["entrance"]
+    cx, cy = inst["centroid"]
+    fx, fy = cx - ex, cy - ey
+    d = (fx * fx + fy * fy) ** 0.5
+    fx, fy = fx / d, fy / d
+    assert src.interior_zone(ex + fx * 2, ey + fy * 2) == 1
+    far_e, far_n = ex + fx * (d * 2 - 2), ey + fy * (d * 2 - 2)
+    assert src.interior_zone(far_e, far_n) == 9
+    # The zoned raster is contiguous and door-anchored.
+    cells = _zone_grid(src, inst)
+    seed = min(cells, key=lambda c: (c[0] - ex) ** 2 + (c[1] - ey) ** 2)
+    assert _flood(cells, seed) == set(cells)
+    # No furniture modules for a restaurant layout.
+    from geoworld_compiler.modules import module_placements
+    assert module_placements(src) == []
