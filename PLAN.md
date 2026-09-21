@@ -996,6 +996,13 @@ every garage is a GENERIC blob, so houses lose their garages.
 **Definition of done:** MS-only residential blocks show garage/shed boxes where
 the footprints exist; survey gains a `building_outbuilding_*` assertion.
 
+**Built**: `--reclassify-outbuildings` — a Microsoft-only footprint ≤ 80 m²
+within 30 m of an OSM residential polygon is reclassified OUTBUILDING
+(`_reclassify_outbuildings` + `_ring_area` + point-to-segment distance);
+OSM-tagged footprints are never touched. ~35K outbuilding cells in the
+Lincoln suburbs alone. Palette: one level, no garage doors. Survey PASS
+(315/315 assertions) on the rebuilt dataset.
+
 ---
 
 ## Phase 18 — Residential variety: facades and roof shapes

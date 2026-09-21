@@ -256,3 +256,22 @@ def test_poi_node_join(tmp_path, projection):
     assert src.building_class(60.0, 0.0) == BUILDING_RESTAURANT
     # A church is a specific classification — the POI cannot override it.
     assert src.building_class(0.0, 60.0) == BUILDING_CHURCH
+
+
+def test_ms_outbuilding_near_house(tmp_path, projection):
+    # Phase 17: a small ML-only footprint beside a residence is a garage.
+    osm = _write(tmp_path, [
+        _way(1, {"building": "house"}, _poly(0.0, 0.0, 15.0)),
+    ])
+    ms = _ms(tmp_path, [
+        (_poly(0.0, 30.0, 3.0), -1.0),    # 6x6 garage ~12 m north
+        (_poly(60.0, 60.0, 3.0), -1.0),   # same size, far away
+        (_poly(0.0, -60.0, 15.0), -1.0),  # large MS box near the house
+    ])
+    src = BuildingSource(osm, projection,
+                         bounds=(-200.0, -200.0, 200.0, 200.0),
+                         ms_json_path=ms, reclassify_outbuildings=True)
+    assert src.building_class(0.0, 30.0) == BUILDING_OUTBUILDING
+    assert src.building_levels(0.0, 30.0) == 1
+    assert src.building_class(60.0, 60.0) == BUILDING_GENERIC
+    assert src.building_class(0.0, -60.0) == BUILDING_GENERIC

@@ -409,6 +409,70 @@ def _join_pois(pois_json_path: str | Path, projection: Projection,
                 claimed.add(i)
 
 
+# Phase 17 outbuilding heuristic: a small ML-only footprint beside a
+# residence is a detached garage or shed. A double garage is ~50 m²; 80
+# leaves headroom without swallowing real small houses.
+_OUTBUILDING_MAX_AREA_M2 = 80.0
+_OUTBUILDING_NEAR_M = 30.0
+
+
+def _dist_pt_seg(px: float, py: float,
+                 x0: float, y0: float, x1: float, y1: float) -> float:
+    dx, dy = x1 - x0, y1 - y0
+    l2 = dx * dx + dy * dy
+    if l2 == 0.0:
+        return math.hypot(px - x0, py - y0)
+    t = max(0.0, min(1.0, ((px - x0) * dx + (py - y0) * dy) / l2))
+    return math.hypot(px - (x0 + t * dx), py - (y0 + t * dy))
+
+
+def _rings_within(ring_a: list[tuple[float, float]],
+                  ring_b: list[tuple[float, float]], d: float) -> bool:
+    """Any vertex of ring_a within d meters of ring_b's edges."""
+    for ex, en in ring_a:
+        for (x0, y0), (x1, y1) in zip(ring_b, ring_b[1:]):
+            if _dist_pt_seg(ex, en, x0, y0, x1, y1) <= d:
+                return True
+    return False
+
+
+def _reclassify_outbuildings(
+        polys: list[tuple[int, int, int, tuple, dict]]) -> None:
+    """Small ML-only footprints beside a residence are garages and sheds.
+
+    The Microsoft detector sees detached garages/sheds as generic boxes
+    and OSM only tags the ones people bothered with — so a tiny MS
+    footprint within a yard of a house gets the outbuilding palette
+    (Phase 17). OSM-tagged buildings are never reclassified here.
+    """
+    grid = _bbox_grid(polys)
+    cell_m = 128.0
+    for i, (prio, cls, lv, bbox, g) in enumerate(polys):
+        if cls != BUILDING_GENERIC or prio != _PRIO_MS:
+            continue
+        ring = g["coordinates"][0]
+        if _ring_area(ring) > _OUTBUILDING_MAX_AREA_M2:
+            continue
+        near = (bbox[0] - _OUTBUILDING_NEAR_M, bbox[1] - _OUTBUILDING_NEAR_M,
+                bbox[2] + _OUTBUILDING_NEAR_M, bbox[3] + _OUTBUILDING_NEAR_M)
+        found = False
+        for ce in range(int(near[0] // cell_m), int(near[2] // cell_m) + 1):
+            for cn in range(int(near[1] // cell_m), int(near[3] // cell_m) + 1):
+                for j in grid.get((ce, cn), ()):
+                    if polys[j][1] != BUILDING_RESIDENTIAL:
+                        continue
+                    if _rings_within(ring, polys[j][4]["coordinates"][0],
+                                     _OUTBUILDING_NEAR_M):
+                        found = True
+                        break
+                if found:
+                    break
+            if found:
+                break
+        if found:
+            polys[i] = (prio, BUILDING_OUTBUILDING, 1, bbox, g)
+
+
 class BuildingSource:
     """Per-cell building class + floor count from merged footprints.
 
@@ -430,6 +494,7 @@ class BuildingSource:
                  resolution_m: float = 1.0,
                  ms_json_path: str | Path | None = None,
                  pois_json_path: str | Path | None = None,
+                 reclassify_outbuildings: bool = False,
                  elev_m=None, transform: GeoTransform | None = None):
         if osm_json_path is None and ms_json_path is None:
             raise ValueError("BuildingSource needs at least one input")
@@ -489,6 +554,8 @@ class BuildingSource:
 
         if pois_json_path is not None:
             _join_pois(pois_json_path, projection, polys)
+        if reclassify_outbuildings:
+            _reclassify_outbuildings(polys)
 
         polys.sort(key=lambda p: p[0])
 

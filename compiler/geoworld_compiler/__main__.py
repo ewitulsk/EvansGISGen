@@ -63,6 +63,9 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--pois", default=None,
                    help="OSM POI node JSON from fetch-pois; reclassifies "
                         "weak footprints by contained POI (Phase 16)")
+    b.add_argument("--reclassify-outbuildings", action="store_true",
+                   help="reclassify small ML-only footprints near houses "
+                        "as garages/sheds (Phase 17)")
     b.add_argument("--bounds", default=None,
                    help="'eMin,nMin,eMax,nMax' dataset rect in geo meters "
                         "(default: +-radius square)")
@@ -386,6 +389,7 @@ def main(argv: list[str] | None = None) -> int:
                     args.buildings, projection, bounds=sb,
                     ms_json_path=args.ms_buildings,
                     pois_json_path=args.pois,
+                    reclassify_outbuildings=args.reclassify_outbuildings,
                     elev_m=getattr(source, "elevation_m", None),
                     transform=transform)
 
