@@ -42,6 +42,7 @@ from rasterio.features import rasterize
 from .banded import BandedGrid, geom_bbox, rects_intersect
 from .businesses import (BUSINESSES, IDENTITY_TAGS, registry_doc,
                          resolve_business)
+from .interiors import supports_layout, zone_field
 from .tileio import NODATA
 from .transform import GeoTransform, Projection
 
@@ -675,6 +676,7 @@ class BuildingSource:
         # business key, stable id, ring and solved entrance/axis feed both
         # the `business` layer and the businesses.json sidecar.
         self.instances: list[dict] = []
+        inst_by_idx: dict[int, dict] = {}
         for idx, ((prio, cls, levels, bbox, g), ident) in enumerate(
                 zip(polys, identities), start=1):
             ring = g["coordinates"][0]
@@ -691,7 +693,8 @@ class BuildingSource:
             bus_lut[idx] = BUSINESSES[key]["id"]
             stable = (f"osm:way/{ident['way']}" if ident["way"] is not None
                       else f"ms:{_wide_id(ring):x}")
-            self.instances.append({
+            inst = {
+                "idx": idx,
                 "key": stable,
                 "business": key,
                 "name": ident["tags"].get("name")
@@ -701,13 +704,17 @@ class BuildingSource:
                 "bbox": bbox,
                 "entrance": _entrance_point(ring, ce, cn, access),
                 "axis_deg": _dominant_axis_deg(ring),
-            })
+                "layout": BUSINESSES[key]["layout"],
+            }
+            self.instances.append(inst)
+            inst_by_idx[idx] = inst
 
         building = BandedGrid(bounds, resolution_m, np.uint8)
         levels_grid = BandedGrid(bounds, resolution_m, np.uint8)
         id_grid = BandedGrid(bounds, resolution_m, np.uint16)
         roof_grid = BandedGrid(bounds, resolution_m, np.int16)
         business_grid = BandedGrid(bounds, resolution_m, np.uint8)
+        interior_grid = BandedGrid(bounds, resolution_m, np.uint8)
         # Polygons need no context margin — there is no distance field.
         for r0, r1, w0, w1, wt in building.band_windows(margin_m=0.0):
             wrect = building.window_rect(w0, w1)
@@ -727,6 +734,20 @@ class BuildingSource:
                 win_l = lvl_lut[win_idx]
                 win_r = roof_lut[win_idx]
                 win_bus = bus_lut[win_idx]
+                # Phase 20: interior zones for business footprints whose
+                # registry entry names a layout. Zone assignment runs on
+                # the polygon's own cells in its entrance-anchored frame.
+                win_zone = np.zeros((w1 - w0, building.width),
+                                    dtype=np.uint8)
+                for idx in np.unique(win_idx):
+                    inst = inst_by_idx.get(int(idx))
+                    if inst is None or not supports_layout(inst["layout"]):
+                        continue
+                    mask = win_idx == idx
+                    rows, cols = np.nonzero(mask)
+                    es = wt.c + (cols + 0.5) * wt.a
+                    ns = wt.f + (rows + 0.5) * wt.e
+                    win_zone[mask] = zone_field(inst, es, ns)
             else:
                 win_b = np.zeros((w1 - w0, building.width), dtype=np.uint8)
                 win_l = np.zeros((w1 - w0, building.width), dtype=np.uint8)
@@ -734,17 +755,20 @@ class BuildingSource:
                 win_r = np.full((w1 - w0, building.width), NODATA,
                                 dtype=np.int16)
                 win_bus = np.zeros((w1 - w0, building.width), dtype=np.uint8)
+                win_zone = np.zeros((w1 - w0, building.width), dtype=np.uint8)
             building.commit(r0, r1, w0, win_b)
             levels_grid.commit(r0, r1, w0, win_l)
             id_grid.commit(r0, r1, w0, win_id)
             roof_grid.commit(r0, r1, w0, win_r)
             business_grid.commit(r0, r1, w0, win_bus)
+            interior_grid.commit(r0, r1, w0, win_zone)
 
         self._building = building
         self._levels = levels_grid
         self._ids = id_grid
         self._roofs = roof_grid
         self._business = business_grid
+        self._interior = interior_grid
 
     @staticmethod
     def _roof_y(ring: list[tuple[float, float]], levels: int,
@@ -812,7 +836,8 @@ class BuildingSource:
 
     def interior_zone(self, east: float, north: float) -> int:
         """Interior zone id at geo coords; 0 = none (Phase 20)."""
-        return 0
+        cell = self._cell(east, north)
+        return 0 if cell is None else int(self._interior[cell])
 
     def businesses_doc(self) -> dict:
         """The dataset's businesses.json sidecar content (Phase 19).

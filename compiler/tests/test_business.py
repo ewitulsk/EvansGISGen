@@ -103,6 +103,55 @@ def test_businesses_doc(tmp_path, projection):
     assert signs[0]["lines"] == ["Walmart Supercenter"]
 
 
+def test_interior_zones_anchor_to_entrance(tmp_path, projection):
+    # Access east of the footprint -> entrance on the east edge; the
+    # vestibule hugs it and the backroom sits at the far (west) side.
+    def access(e, n):
+        east_e, _ = projection.to_geo(40.270, -96.7494)
+        return e >= east_e + 30
+    osm = _write(tmp_path, "b.json", {"elements": [
+        _way(593154777, WM_RING,
+             {"building": "retail", "brand": "Walmart"})]})
+    src = BuildingSource(osm, projection, bounds=(-500, -500, 500, 500),
+                         access=access)
+    inst = src.instances[0]
+    ex, ey = inst["entrance"]
+    cx, cy = inst["centroid"]
+    fx, fy = cx - ex, cy - ey
+    d = (fx * fx + fy * fy) ** 0.5
+    fx, fy = fx / d, fy / d
+    # 3m inside from the entrance -> vestibule or its flanking cart area.
+    assert src.interior_zone(ex + fx * 3, ey + fy * 3) in (1, 10)
+    # Deep interior point near the far wall -> backroom.
+    far_e, far_n = ex + fx * (d * 2 - 5), ey + fy * (d * 2 - 5)
+    assert src.interior_zone(far_e, far_n) == 9
+    # Centroid is some department — not zero.
+    assert src.interior_zone(cx, cy) != 0
+    # Outside the footprint -> no zone.
+    assert src.interior_zone(cx, cy - 10000) == 0
+
+
+def test_no_layout_business_has_no_zones(tmp_path, projection):
+    # U.S. Bank carries no interior layout — business layer paints but
+    # the interior raster stays empty.
+    e0, n0 = projection.to_geo(40.8136085, -96.7030413)
+    lat0, lon0 = 40.8136085, -96.7030413
+    import math
+    m_per_deg_lat = 111320.0
+    m_per_deg_lon = 111320.0 * math.cos(math.radians(lat0))
+    ring = [(lon0 + de / m_per_deg_lon, lat0 + dn / m_per_deg_lat)
+            for de, dn in ((-20, -15), (20, -15), (20, 15),
+                           (-20, 15), (-20, -15))]
+    osm = _write(tmp_path, "b.json", {"elements": [
+        _way(777, ring, {"building": "yes"})]})
+    src = BuildingSource(osm, projection,
+                         bounds=(e0 - 500, n0 - 500, e0 + 500, n0 + 500))
+    inst = [i for i in src.instances if i["business"] == "us_bank"]
+    assert len(inst) == 1
+    assert src.interior_zone(inst[0]["centroid"][0],
+                             inst[0]["centroid"][1]) == 0
+
+
 def test_entrance_prefers_access_side(tmp_path, projection):
     # Access road along the ring's east edge -> entrance sits east.
     ring = WM_RING
