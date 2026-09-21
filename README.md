@@ -271,3 +271,13 @@ python -m geoworld_compiler build --source dem --dem ../datasets/raw/*.tif \
     --radius 4000 --ramp 500
 python -m pytest tests/
 ```
+
+### Iteration policy: small regions first
+
+A full `beatrice.geoworld` rebuild takes ~4–5 hours. Test dataset changes
+against a **small `--bounds` rect** instead — a slice of Beatrice
+(`-2000,-2000,4000,4000`), or downtown Lincoln (`1000,-61500,3500,-59500`)
+when the feature needs tall buildings/dense fabric — then run
+`pytest` + `tileio.read_tile` probes + the terrain survey on the small
+output. Reserve the full-dataset build for the final release once all
+planned phases are implemented. See [AGENTS.md](AGENTS.md).
