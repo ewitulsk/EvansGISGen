@@ -164,6 +164,14 @@ Notes:
   "instances": {stable_key: {"business","name","entrance","axis_deg"}}}`.
   `stable_key` is `osm:way/<id>` for OSM footprints or `ms:<hash>` for
   ML-only ones — never the collidable 16-bit `building_id`.
+- `modules.json` + `modules/*.nbt` (Phase 21): optional sidecar pair —
+  `{"modules": {name: "modules/<name>.nbt"}, "placements":
+  [{"module","e","n","rot","building"}]}`. `e`/`n` is the module's
+  footprint center in geo meters; `rot` uses the landmark rotation
+  vocabulary (`NONE`, `CLOCKWISE_90`, `CLOCKWISE_180`,
+  `COUNTERCLOCKWISE_90`) and pivots on the center. The runtime stamps
+  each placement chunk-clamped on the instance's floor slab, skipping
+  columns a landmark claims.
 - Unknown mask bits should be skipped by readers after parsing their section
   header (forward compatibility). Sections always appear in ascending bit
   order.

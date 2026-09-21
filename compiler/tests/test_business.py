@@ -152,6 +152,37 @@ def test_no_layout_business_has_no_zones(tmp_path, projection):
                              inst[0]["centroid"][1]) == 0
 
 
+def test_module_placements(tmp_path, projection):
+    from geoworld_compiler.modules import (module_placements, modules_doc,
+                                           write_module_nbts)
+    ring = WM_RING
+    def access(e, n):
+        east_e, _ = projection.to_geo(40.270, -96.7494)
+        return e >= east_e + 30
+    osm = _write(tmp_path, "b.json", {"elements": [
+        _way(593154777, ring,
+             {"building": "retail", "brand": "Walmart"})]})
+    src = BuildingSource(osm, projection, bounds=(-500, -500, 500, 500),
+                         access=access)
+    placements = module_placements(src)
+    assert placements, "expected module placements"
+    kinds = {p["module"] for p in placements}
+    assert kinds <= {"shelf_aisle", "checkout_lane", "cart_corral",
+                     "vestibule"}
+    inst = src.instances[0]
+    x0, z0, x1, z1 = inst["bbox"]
+    for p in placements:
+        assert x0 - 1 <= p["e"] <= x1 + 1
+        assert z0 - 1 <= p["n"] <= z1 + 1
+        assert p["building"] == inst["key"]
+        # placements sit on a zoned cell
+        assert src.interior_zone(p["e"], p["n"]) != 0
+    doc = modules_doc(placements)
+    assert "modules" in doc and "shelf_aisle" in doc["modules"]
+    names = write_module_nbts(tmp_path)
+    assert (tmp_path / "modules" / "shelf_aisle.nbt").exists()
+
+
 def test_entrance_prefers_access_side(tmp_path, projection):
     # Access road along the ring's east edge -> entrance sits east.
     ring = WM_RING
