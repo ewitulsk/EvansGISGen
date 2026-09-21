@@ -48,6 +48,8 @@ class Buildings(Protocol):
     def building_levels(self, east: float, north: float) -> int: ...
     def building_id(self, east: float, north: float) -> int: ...
     def building_roof(self, east: float, north: float) -> int: ...
+    def business_at(self, east: float, north: float) -> int: ...
+    def interior_zone(self, east: float, north: float) -> int: ...
 
 
 def build_dataset(
@@ -84,6 +86,8 @@ def build_dataset(
     any_deck = False
     any_surface = False
     any_building = False
+    any_business = False
+    any_interior = False
     n = TILE_SIZE * TILE_SIZE
     for tx in range(t_min_x, t_max_x + 1):
         for tz in range(t_min_z, t_max_z + 1):
@@ -108,12 +112,16 @@ def build_dataset(
             b_levels = bytearray(n)
             b_id = [0] * n
             b_roof = [NODATA] * n
+            business = bytearray(n)
+            interior = bytearray(n)
             any_influence = False
             any_tile_water = False
             any_tile_road = False
             any_tile_deck = False
             any_tile_surface = False
             any_tile_building = False
+            any_tile_business = False
+            any_tile_interior = False
             for lz in range(TILE_SIZE):
                 bz = tz * TILE_SIZE + lz
                 north = transform.north_meters(bz)
@@ -165,6 +173,14 @@ def build_dataset(
                             b_id[i] = buildings.building_id(east, north)
                             b_roof[i] = buildings.building_roof(east, north)
                             any_tile_building = True
+                            bus = buildings.business_at(east, north)
+                            if bus:
+                                business[i] = bus
+                                any_tile_business = True
+                            zone = buildings.interior_zone(east, north)
+                            if zone:
+                                interior[i] = zone
+                                any_tile_interior = True
                     influence[i] = min(255, max(0, int(w * 255.0 + 0.5)))
                     any_influence = True
             if any_influence:
@@ -185,6 +201,10 @@ def build_dataset(
                     layers["building_levels"] = bytes(b_levels)
                     layers["building_id"] = pack_u16(b_id)
                     layers["building_roof"] = pack_elevation(b_roof)
+                if any_tile_business:
+                    layers["business"] = bytes(business)
+                if any_tile_interior:
+                    layers["interior"] = bytes(interior)
                 write_tile(tiles_dir / tile_filename(tx, tz), tx, tz, layers)
                 written.append((tx, tz))
                 any_water = any_water or any_tile_water
@@ -192,6 +212,8 @@ def build_dataset(
                 any_deck = any_deck or any_tile_deck
                 any_surface = any_surface or any_tile_surface
                 any_building = any_building or any_tile_building
+                any_business = any_business or any_tile_business
+                any_interior = any_interior or any_tile_interior
             print(f"  tile {tx:+d},{tz:+d}: {'written' if any_influence else 'skipped'}",
                   flush=True)
 
@@ -201,12 +223,33 @@ def build_dataset(
               + (["road"] if any_road else [])
               + (["roadz", "roade"] if any_deck else [])
               + (["building", "building_levels",
-                  "building_id", "building_roof"] if any_building else []))
+                  "building_id", "building_roof"] if any_building else [])
+              + (["business"] if any_business else [])
+              + (["interior"] if any_interior else []))
     write_manifest(out, name=name, transform=transform, projection=projection,
                    layers=layers, tiles=written)
     # Street furniture sidecar: sign placements mined from the road ways
     # (intersection blades + stop/yield nodes) for the runtime SignIndex.
     signs = getattr(roads, "signs", None) if roads is not None else None
+    signs = list(signs) if signs else []
+    if buildings is not None:
+        # Known-business pylon signs ride the same sidecar — the runtime
+        # SignPlacer branches on `type` (Phase 19).
+        signs += getattr(buildings, "business_signs", lambda: [])()
+        doc = getattr(buildings, "businesses_doc", lambda: None)()
+        if doc and doc.get("instances"):
+            import json
+            (out / "businesses.json").write_text(json.dumps(doc))
+            print(f"businesses: {len(doc['instances'])} known instances")
+            # Phase 21: interior modules — v1 NBTs generated here, plus a
+            # placements sidecar the runtime stamps chunk-clamped.
+            from .modules import module_placements, modules_doc, write_module_nbts
+            placements = module_placements(buildings)
+            if placements:
+                write_module_nbts(out)
+                (out / "modules.json").write_text(
+                    json.dumps(modules_doc(placements)))
+                print(f"modules: {len(placements)} placements")
     if signs:
         import json
         (out / "signs.json").write_text(json.dumps({"signs": signs}))

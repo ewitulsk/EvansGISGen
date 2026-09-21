@@ -1,8 +1,10 @@
 package com.evansgisgen.geoworld.worldgen;
 
 import com.evansgisgen.geoworld.GeoWorldMod;
+import com.evansgisgen.geoworld.business.BusinessIndex;
 import com.evansgisgen.geoworld.geo.GeoDataset;
 import com.evansgisgen.geoworld.landmark.LandmarkIndex;
+import com.evansgisgen.geoworld.module.ModuleIndex;
 import com.evansgisgen.geoworld.geo.GeoTile;
 import com.evansgisgen.geoworld.geo.GeoTransform;
 import com.mojang.datafixers.util.Pair;
@@ -162,6 +164,40 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
     static final int BUILDING_AGRICULTURAL = 16;
     static final int BUILDING_CAR = 17;
     static final int BUILDING_STORAGE = 18;
+
+    // Interior zone ids — shared with the compiler (Phase 20, interior
+    // layer). 0 = unzoned.
+    static final int ZONE_VESTIBULE = 1;
+    static final int ZONE_CHECKOUT = 2;
+    static final int ZONE_SELF_CHECKOUT = 3;
+    static final int ZONE_GROCERY = 4;
+    static final int ZONE_GENERAL = 5;
+    static final int ZONE_CLOTHING = 6;
+    static final int ZONE_ELECTRONICS = 7;
+    static final int ZONE_PHARMACY = 8;
+    static final int ZONE_BACKROOM = 9;
+    static final int ZONE_CART_STORAGE = 10;
+
+    /**
+     * Floor slab material per interior zone (Phase 20). Zones tint the
+     * floor so the store reads as departments from inside; circulation
+     * areas stay neutral.
+     */
+    public static BlockState zoneFloor(int zone) {
+        return switch (zone) {
+            case ZONE_VESTIBULE -> Blocks.SMOOTH_STONE.defaultBlockState();
+            case ZONE_CHECKOUT -> Blocks.WHITE_CONCRETE.defaultBlockState();
+            case ZONE_SELF_CHECKOUT -> Blocks.LIGHT_BLUE_CONCRETE.defaultBlockState();
+            case ZONE_GROCERY -> Blocks.WHITE_CONCRETE.defaultBlockState();
+            case ZONE_GENERAL -> Blocks.LIGHT_GRAY_CONCRETE.defaultBlockState();
+            case ZONE_CLOTHING -> Blocks.CYAN_CARPET.defaultBlockState();
+            case ZONE_ELECTRONICS -> Blocks.BLUE_CARPET.defaultBlockState();
+            case ZONE_PHARMACY -> Blocks.WHITE_CARPET.defaultBlockState();
+            case ZONE_BACKROOM -> Blocks.GRAY_CONCRETE.defaultBlockState();
+            case ZONE_CART_STORAGE -> Blocks.POLISHED_ANDESITE.defaultBlockState();
+            default -> Blocks.STONE.defaultBlockState();
+        };
+    }
 
     /** Wall/floor/roof materials per building class (Phase 8 theme). */
     public record BuildPalette(BlockState wall, BlockState floor,
@@ -672,7 +708,8 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
                 com.evansgisgen.geoworld.studio.StudioService.overlayRoot(
                         level.getLevel()));
         applySurface(chunk);
-        buildBuildings(chunk, landmarks);
+        buildBuildings(chunk, landmarks,
+                businesses(level.registryAccess()));
         paveRoads(chunk);
         delegate.applyBiomeDecoration(level, chunk, structureManager);
         plantForest(level, chunk);
@@ -682,11 +719,96 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
         clearCover(chunk);
         // Street furniture: sign posts from the compiled signs.json
         // sidecar (Phase 13) — before landmarks so a curated build wins.
+        // Business pylons may stand on parking-apron cells that the
+        // generic ground rule refuses, so they get their own resolver.
         com.evansgisgen.geoworld.sign.SignPlacer.place(signs(), level, chunk,
-                p -> signGround(chunk, p.getX(), p.getZ()));
+                p -> signGround(chunk, p.getX(), p.getZ()),
+                p -> signGroundLoose(chunk, p.getX(), p.getZ()));
         // Curated .nbt landmarks place last, sliced to this chunk's bounds
         // (Phase 9) — nothing else may overwrite them.
         landmarks.placeChunk(level, chunk, GeoChunkGenerator::isFeatureOverhang);
+        // Interior modules (Phase 21) stamp inside business shells once
+        // shells and floors exist — never inside a landmark's claim.
+        ModuleIndex modules = businesses(level.registryAccess()).isEmpty()
+                ? ModuleIndex.EMPTY : modules(level.registryAccess());
+        if (!modules.isEmpty()) {
+            modules.placeChunk(level, chunk,
+                    p -> interiorFloorY(chunk, p.getX(), p.getZ(),
+                            landmarks));
+        }
+    }
+
+    /**
+     * Lazily resolves the dataset's businesses.json sidecar (Phase 19) —
+     * needs the block registry, which isn't available at generator
+     * construction.
+     */
+    private volatile BusinessIndex businessIndex;
+
+    public BusinessIndex businesses(RegistryAccess registryAccess) {
+        BusinessIndex index = businessIndex;
+        if (index == null) {
+            synchronized (this) {
+                index = businessIndex;
+                if (index == null) {
+                    index = dataset.isEmpty()
+                            ? BusinessIndex.EMPTY
+                            : BusinessIndex.load(dataset,
+                                    registryAccess.lookupOrThrow(Registries.BLOCK));
+                    businessIndex = index;
+                }
+            }
+        }
+        return index;
+    }
+
+    /** Lazily resolves the dataset's modules.json sidecar (Phase 21). */
+    private volatile ModuleIndex moduleIndex;
+
+    public ModuleIndex modules(RegistryAccess registryAccess) {
+        ModuleIndex index = moduleIndex;
+        if (index == null) {
+            synchronized (this) {
+                index = moduleIndex;
+                if (index == null) {
+                    index = dataset.isEmpty()
+                            ? ModuleIndex.EMPTY
+                            : ModuleIndex.load(dataset,
+                                    registryAccess.lookupOrThrow(Registries.BLOCK));
+                    moduleIndex = index;
+                }
+            }
+        }
+        return index;
+    }
+
+    /**
+     * Floor-slab Y at a column — the same per-instance solve
+     * {@link #buildBuildings} uses; returns minY when no building or a
+     * landmark claim covers the column so stray placements are skipped.
+     */
+    private int interiorFloorY(ChunkAccess chunk, int x, int z,
+            LandmarkIndex landmarks) {
+        if (landmarks.suppressesBuildingAt(x, z)) {
+            return getMinY();  // a landmark claims this spot
+        }
+        GeoTile tile = dataset.tileAt(x, z).orElse(null);
+        if (tile == null) {
+            return getMinY();
+        }
+        int tlx = dataset.localCoord(x);
+        int tlz = dataset.localCoord(z);
+        if (tile.buildingClass(tlx, tlz) == BUILDING_NONE) {
+            return getMinY();
+        }
+        int compiledRoof = tile.buildingRoofY(tlx, tlz);
+        if (compiledRoof == GeoTile.NO_DATA) {
+            return getMinY();
+        }
+        int levels = Math.max(1, tile.buildingLevels(tlx, tlz));
+        int topY = getMinY() + getGenDepth() - 1;
+        int roof = Math.min(topY, compiledRoof);
+        return Math.max(getMinY() + 1, roof - levels * 3 - 1);
     }
 
     /**
@@ -779,6 +901,27 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
     }
 
     /**
+     * Ground Y for a business pylon (Phase 19) — looser than
+     * {@link #signGround}: pylons are meant to stand on parking aprons
+     * and road verges, so only water, decks and footprint cells refuse.
+     */
+    private int signGroundLoose(ChunkAccess chunk, int x, int z) {
+        GeoTile tile = dataset.tileAt(x, z).orElse(null);
+        if (tile != null) {
+            int tlx = dataset.localCoord(x);
+            int tlz = dataset.localCoord(z);
+            if (tile.waterDepth(tlx, tlz) > 0
+                    || tile.roadDeckY(tlx, tlz) != GeoTile.NO_DATA
+                    || tile.buildingClass(tlx, tlz) != BUILDING_NONE) {
+                return getMinY();  // unplaceable — skip
+            }
+        }
+        int minY = getMinY();
+        int topY = minY + getGenDepth() - 1;
+        return groundHeight(chunk, new BlockPos.MutableBlockPos(), x, z, minY, topY);
+    }
+
+    /**
      * Replaces the top terrain block of classified land-use columns with the
      * class's surface block (Phase 7). Water/road/building columns are
      * skipped — the road and building passes own those cells.
@@ -842,7 +985,8 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
      * tile/chunk borders stay consistent. Water/road cells are skipped, as
      * are cells a landmark claims (Phase 9 — no shell under a curated build).
      */
-    private void buildBuildings(ChunkAccess chunk, LandmarkIndex landmarks) {
+    private void buildBuildings(ChunkAccess chunk, LandmarkIndex landmarks,
+            BusinessIndex businesses) {
         if (dataset.isEmpty()) {
             return;
         }
@@ -854,6 +998,10 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
         int minY = getMinY();
         int topY = minY + getGenDepth() - 1;
         BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+        // Phase 20: business entrances get carved doorways — a player can
+        // always walk in off the street.
+        List<BusinessIndex.Entrance> doors =
+                businesses.entrancesInChunk(chunkPos.x, chunkPos.z);
         boolean modified = false;
         for (int lx = 0; lx < 16; lx++) {
             for (int lz = 0; lz < 16; lz++) {
@@ -877,6 +1025,13 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
                 }
                 int id = tile.buildingId(tlx, tlz);
                 BuildPalette palette = buildingPalette(cls, id);
+                // Phase 19: a known business repaints its shell — the
+                // facade palette overrides the class/instance palette
+                // per-component, so partial palettes inherit sensibly.
+                int bizId = tile.business(tlx, tlz);
+                BusinessIndex.Facade facade = bizId != 0
+                        ? businesses.facade(bizId) : null;
+                int zone = tile.interiorZone(tlx, tlz);
                 int levels = Math.max(1, tile.buildingLevels(tlx, tlz));
                 // Phase 15: one roof height per instance, solved by the
                 // compiler from the footprint's highest ground. On slopes
@@ -913,6 +1068,21 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
                             || dataset.buildingClassAt(x, z - 1) == BUILDING_NONE;
                 }
                 if (edge) {
+                    // Doorway: wall columns within ~2 blocks of a solved
+                    // entrance open for three courses above the floor.
+                    boolean doorway = false;
+                    if (facade != null) {
+                        for (BusinessIndex.Entrance ent : doors) {
+                            if (Math.abs(ent.x() - x) <= 2
+                                    && Math.abs(ent.z() - z) <= 2
+                                    && (ent.x() - x) * (ent.x() - x)
+                                            + (ent.z() - z) * (ent.z() - z)
+                                            <= 4) {
+                                doorway = true;
+                                break;
+                            }
+                        }
+                    }
                     for (int y = base - FOUNDATION_DEPTH; y < roof; y++) {
                         if (y <= minY) {
                             continue;
@@ -925,17 +1095,45 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
                             }
                             continue;
                         }
+                        if (doorway && y > base && y <= base + 3) {
+                            chunk.setBlockState(pos, AIR, false);
+                            continue;
+                        }
                         // Window pattern: glass on a diagonal grid through the
                         // mid-wall rows; ground row and top row stay solid.
                         boolean window = y > base && y < roof - 1
                                 && Math.floorMod(x + z, 3) == 0;
+                        BlockState wallMat = palette.wall();
+                        BlockState windowMat = palette.window();
+                        if (facade != null) {
+                            if (facade.wall() != null) {
+                                wallMat = facade.wall();
+                            }
+                            if (facade.window() != null) {
+                                windowMat = facade.window();
+                            }
+                            // Accent band: "parapet" paints the top two
+                            // wall courses — the Walmart blue stripe.
+                            if (facade.accent() != null
+                                    && "parapet".equals(facade.accentY())
+                                    && y >= roof - 2) {
+                                wallMat = facade.accent();
+                                windowMat = facade.accent();
+                            }
+                        }
                         chunk.setBlockState(pos,
-                                window ? palette.window() : palette.wall(), false);
+                                window ? windowMat : wallMat, false);
                     }
                 } else {
-                    // Interior: one uniform floor slab per instance; air
-                    // below the slab (downhill side) fills as crawlspace.
-                    chunk.setBlockState(pos.set(x, base, z), palette.floor(), false);
+                    // Interior: one floor slab per instance — zoned floors
+                    // for layout businesses (Phase 20), else the facade/
+                    // class floor. Air below the slab (downhill side)
+                    // fills as crawlspace.
+                    BlockState floorMat = zone != 0
+                            ? zoneFloor(zone)
+                            : (facade != null && facade.floor() != null
+                                    ? facade.floor() : palette.floor());
+                    chunk.setBlockState(pos.set(x, base, z), floorMat, false);
                     for (int y = ground + 1; y < base; y++) {
                         BlockState cur = chunk.getBlockState(pos.set(x, y, z));
                         if (cur.isAir() || !cur.getFluidState().isEmpty()) {
@@ -962,8 +1160,10 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
                     };
                     cap = Math.min(eave / GABLE_RISE_DIV, GABLE_MAX_RISE);
                 }
+                BlockState roofMat = facade != null && facade.roof() != null
+                        ? facade.roof() : palette.roof();
                 for (int y = roof; y <= roof + cap && y <= topY; y++) {
-                    chunk.setBlockState(pos.set(x, y, z), palette.roof(), false);
+                    chunk.setBlockState(pos.set(x, y, z), roofMat, false);
                 }
                 modified = true;
             }

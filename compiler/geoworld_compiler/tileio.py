@@ -34,6 +34,8 @@ LAYER_BITS = {
     "roade": 0x200,      # u8[TILE^2]   elevated deck cross-section class
     "building_id": 0x400,   # u16[TILE^2] footprint instance ids (0 = none)
     "building_roof": 0x800, # i16[TILE^2] uniform roof top Y (NODATA = none)
+    "business": 0x1000,     # u8[TILE^2]   known-business ids (0 = none)
+    "interior": 0x2000,     # u8[TILE^2]   interior zone ids (0 = none)
 }
 _LAYER_ORDER = sorted(LAYER_BITS, key=LAYER_BITS.get)
 

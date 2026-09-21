@@ -385,13 +385,26 @@ def main(argv: list[str] | None = None) -> int:
                 landuse = LanduseSource(args.landuse, projection, bounds=sb)
             if args.buildings or args.ms_buildings:
                 from .buildings import BuildingSource
+                from .landuse import SURFACE_PARKING
+
+                def _access(east, north):
+                    # Entrance solving: roads and mapped parking lots are
+                    # both "street side" for a known business.
+                    if roads is not None and roads.road_class(east, north):
+                        return True
+                    return (landuse is not None
+                            and landuse.surface_class(east, north)
+                            == SURFACE_PARKING)
+
                 buildings = BuildingSource(
                     args.buildings, projection, bounds=sb,
                     ms_json_path=args.ms_buildings,
                     pois_json_path=args.pois,
                     reclassify_outbuildings=args.reclassify_outbuildings,
                     elev_m=getattr(source, "elevation_m", None),
-                    transform=transform)
+                    transform=transform,
+                    access=_access if (roads is not None or landuse is not None)
+                    else None)
 
         out = build_dataset(args.out, name=args.name, transform=transform,
                             source=source, projection=projection,

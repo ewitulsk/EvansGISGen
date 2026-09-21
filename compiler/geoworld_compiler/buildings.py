@@ -40,6 +40,9 @@ import numpy as np
 from rasterio.features import rasterize
 
 from .banded import BandedGrid, geom_bbox, rects_intersect
+from .businesses import (BUSINESSES, IDENTITY_TAGS, registry_doc,
+                         resolve_business)
+from .interiors import supports_layout, zone_field
 from .tileio import NODATA
 from .transform import GeoTransform, Projection
 
@@ -327,6 +330,81 @@ def _instance_id(coords: list[tuple[float, float]]) -> int:
     return 1 + ((h & 0x7FFFFFFF) % 65535)
 
 
+def _wide_id(coords: list[tuple[float, float]]) -> int:
+    """Stable ~52-bit id for a footprint, hashed from its centroid.
+
+    The sidecar's instance key space — unlike the 16-bit emitted
+    `building_id`, this must not collide: two Walmarts keying the same
+    record would alias their entrance/axis metadata.
+    """
+    ce = sum(p[0] for p in coords) / len(coords)
+    cn = sum(p[1] for p in coords) / len(coords)
+    h = (int(ce * 37) * 2654435761) ^ (int(cn * 37) * 40503)
+    return (h & 0xFFFFFFFFFFFFF) or 1
+
+
+# Entrance solving (Phase 19): the footprint edge midpoint with the
+# shortest path to a road/parking cell wins. `access` is a callable
+# (east, north) -> bool over road/parking surfaces; None leaves the
+# centroid-side default (edge nearest the footprint centroid projected
+# outward — still deterministic when no road grid is wired in).
+_ENTRANCE_MAX_DIST_M = 80.0
+_ENTRANCE_STEP_M = 4.0
+_ENTRANCE_ANGLES = 16
+
+
+def _entrance_point(ring: list[tuple[float, float]], ce: float, cn: float,
+                    access) -> list[float]:
+    """Geo [e, n] of the footprint's entrance edge midpoint.
+
+    Scores each edge midpoint by meters-to-nearest-access-cell
+    (radial scan outward); the lowest score wins, ties break on edge
+    order. Without an access provider, the edge whose midpoint is
+    farthest from the centroid is used as a cheap proxy for "front"."""
+    best = None
+    best_score = math.inf
+    for (x0, y0), (x1, y1) in zip(ring, ring[1:]):
+        mx, my = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+        if access is not None:
+            score = _access_distance(access, mx, my)
+        else:
+            score = -math.hypot(mx - ce, my - cn)
+        if score < best_score - 1e-9:
+            best_score = score
+            best = (mx, my)
+    return [best[0], best[1]] if best else [ce, cn]
+
+
+def _access_distance(access, e: float, n: float) -> float:
+    """Approximate meters from (e, n) to the nearest access cell.
+
+    Samples rings of _ENTRANCE_ANGLES points at _ENTRANCE_STEP_M radial
+    steps. Returns _ENTRANCE_MAX_DIST_M when nothing is in reach."""
+    if access(e, n):
+        return 0.0
+    r = _ENTRANCE_STEP_M
+    while r <= _ENTRANCE_MAX_DIST_M:
+        for k in range(_ENTRANCE_ANGLES):
+            a = 2.0 * math.pi * k / _ENTRANCE_ANGLES
+            if access(e + r * math.cos(a), n + r * math.sin(a)):
+                return r
+        r += _ENTRANCE_STEP_M
+    return _ENTRANCE_MAX_DIST_M
+
+
+def _dominant_axis_deg(ring: list[tuple[float, float]]) -> float:
+    """Bearing (deg, 0-180) of the footprint's longest edge."""
+    best_len = -1.0
+    best_ang = 0.0
+    for (x0, y0), (x1, y1) in zip(ring, ring[1:]):
+        dx, dy = x1 - x0, y1 - y0
+        l = dx * dx + dy * dy
+        if l > best_len:
+            best_len = l
+            best_ang = math.degrees(math.atan2(dy, dx))
+    return best_ang % 180.0
+
+
 def _ring_area(coords: list[tuple[float, float]]) -> float:
     """Signed-ring (shoelace) area of a polygon in geo meters."""
     a = 0.0
@@ -366,7 +444,8 @@ def _bbox_grid(polys: list[tuple[int, int, int, tuple, dict]],
 
 
 def _join_pois(pois_json_path: str | Path, projection: Projection,
-               polys: list[tuple[int, int, int, tuple, dict]]) -> None:
+               polys: list[tuple[int, int, int, tuple, dict]],
+               identities: list[dict] | None = None) -> None:
     """Reclassify weak footprints by the POI nodes inside them (Phase 16).
 
     A `shop=supermarket` node inside a generic footprint makes it a
@@ -374,18 +453,25 @@ def _join_pois(pois_json_path: str | Path, projection: Projection,
     duplicates of the same building both qualify); a polygon keeps the
     class of its highest-ranked POI rule, and specific classifications
     (a church, a garage) are never overridden.
+
+    When `identities` is given (parallel to `polys`), each containing
+    footprint also inherits the POI's identity tags (brand/name/...)
+    for business matching — the way's own tags win, the POI fills gaps.
     """
     data = json.loads(Path(pois_json_path).read_text())
     pois = []
     for el in data.get("elements", []):
         if el.get("type") != "node":
             continue
-        hit = _poi_class(el.get("tags", {}))
-        if hit is None:
+        tags = el.get("tags", {})
+        hit = _poi_class(tags)
+        ident = {k: tags[k] for k in IDENTITY_TAGS if k in tags}
+        if hit is None and not ident:
             continue
-        cls, _lv, rank = hit
         east, north = projection.to_geo(el["lat"], el["lon"])
-        pois.append((rank, cls, east, north))
+        rank = hit[2] if hit is not None else len(_POI_TAG_CLASSES) + 1
+        cls = hit[0] if hit is not None else 0
+        pois.append((rank, cls, east, north, ident))
     if not pois:
         return
     pois.sort(key=lambda p: p[0])  # most specific rule first
@@ -395,18 +481,22 @@ def _join_pois(pois_json_path: str | Path, projection: Projection,
     grid = _bbox_grid(polys, cell_m)
 
     claimed: set[int] = set()
-    for _rank, cls, east, north in pois:
+    for _rank, cls, east, north, ident in pois:
         for i in grid.get((int(east // cell_m), int(north // cell_m)), ()):
-            if i in claimed:
-                continue
             prio, pcls, plv, bbox, g = polys[i]
-            if (pcls not in _POI_UPGRADABLE
-                    or not (bbox[0] <= east <= bbox[2]
-                            and bbox[1] <= north <= bbox[3])):
+            if not (bbox[0] <= east <= bbox[2] and bbox[1] <= north <= bbox[3]):
                 continue
-            if _point_in_ring(g["coordinates"][0], east, north):
-                polys[i] = (prio, cls, plv, bbox, g)
-                claimed.add(i)
+            if not _point_in_ring(g["coordinates"][0], east, north):
+                continue
+            if identities is not None and ident:
+                for k, v in ident.items():
+                    identities[i]["tags"].setdefault(k, v)
+            if i in claimed or cls == 0:
+                continue
+            if pcls not in _POI_UPGRADABLE:
+                continue
+            polys[i] = (prio, cls, plv, bbox, g)
+            claimed.add(i)
 
 
 # Phase 17 outbuilding heuristic: a small ML-only footprint beside a
@@ -495,7 +585,8 @@ class BuildingSource:
                  ms_json_path: str | Path | None = None,
                  pois_json_path: str | Path | None = None,
                  reclassify_outbuildings: bool = False,
-                 elev_m=None, transform: GeoTransform | None = None):
+                 elev_m=None, transform: GeoTransform | None = None,
+                 access=None):
         if osm_json_path is None and ms_json_path is None:
             raise ValueError("BuildingSource needs at least one input")
 
@@ -508,14 +599,23 @@ class BuildingSource:
         # One record per footprint: (prio, cls, levels, bbox, geom). Draw
         # order = ascending prio, so the last writer per cell is the winner
         # and the id/class/levels/roof grids all agree on who that was.
+        # `identities` runs parallel to `polys`: OSM way id + identity tags
+        # (brand/name/operator) for known-business matching (Phase 19).
         polys: list[tuple[int, int, int, tuple, dict]] = []
+        identities: list[dict] = []
 
         def add(coords: list[tuple[float, float]],
-                cls: int, levels: int, prio: int) -> None:
+                cls: int, levels: int, prio: int,
+                identity: dict | None = None) -> None:
             if coords[0] != coords[-1]:
                 coords.append(coords[0])
             g = {"type": "Polygon", "coordinates": [coords]}
             polys.append((prio, cls, levels, geom_bbox(g), g))
+            identities.append(identity or {"way": None, "tags": {}})
+
+        def _ident_from_tags(el_id: int | None, tags: dict) -> dict:
+            return {"way": el_id,
+                    "tags": {k: tags[k] for k in IDENTITY_TAGS if k in tags}}
 
         # Microsoft ML footprints: class unknown -> GENERIC at a priority
         # below every OSM group; levels from the height estimate when present.
@@ -550,14 +650,16 @@ class BuildingSource:
                     # a sibling instance would donut the parent. Below MS.
                     prio = _PRIO_ROOF_SHELL
                 coords = [projection.to_geo(p["lat"], p["lon"]) for p in geom]
-                add(coords, cls, levels, prio)
+                add(coords, cls, levels, prio, _ident_from_tags(el["id"], tags))
 
         if pois_json_path is not None:
-            _join_pois(pois_json_path, projection, polys)
+            _join_pois(pois_json_path, projection, polys, identities)
         if reclassify_outbuildings:
             _reclassify_outbuildings(polys)
 
-        polys.sort(key=lambda p: p[0])
+        order = sorted(range(len(polys)), key=lambda i: polys[i][0])
+        polys = [polys[i] for i in order]
+        identities = [identities[i] for i in order]
 
         # Lookup tables keyed by polygon position (1-based; slot 0 = none).
         # The 16-bit instance id is only the *emitted* identity — keying
@@ -568,19 +670,51 @@ class BuildingSource:
         cls_lut = np.zeros(n_polys + 1, dtype=np.uint8)
         lvl_lut = np.zeros(n_polys + 1, dtype=np.uint8)
         roof_lut = np.full(n_polys + 1, NODATA, dtype=np.int16)
+        bus_lut = np.zeros(n_polys + 1, dtype=np.uint8)
         features: list[tuple[tuple, dict, int]] = []  # (bbox, geom, index)
-        for idx, (prio, cls, levels, bbox, g) in enumerate(polys, start=1):
+        # Known-business instances (Phase 19): the footprint's resolved
+        # business key, stable id, ring and solved entrance/axis feed both
+        # the `business` layer and the businesses.json sidecar.
+        self.instances: list[dict] = []
+        inst_by_idx: dict[int, dict] = {}
+        for idx, ((prio, cls, levels, bbox, g), ident) in enumerate(
+                zip(polys, identities), start=1):
             ring = g["coordinates"][0]
             id_lut[idx] = _instance_id(ring)
             cls_lut[idx] = cls
             lvl_lut[idx] = levels
             roof_lut[idx] = self._roof_y(ring, levels, elev_m, transform)
             features.append((bbox, g, idx))
+            ce = sum(p[0] for p in ring[:-1]) / max(1, len(ring) - 1)
+            cn = sum(p[1] for p in ring[:-1]) / max(1, len(ring) - 1)
+            key = resolve_business(ident["tags"], ce, cn, projection)
+            if key is None:
+                continue
+            bus_lut[idx] = BUSINESSES[key]["id"]
+            stable = (f"osm:way/{ident['way']}" if ident["way"] is not None
+                      else f"ms:{_wide_id(ring):x}")
+            inst = {
+                "idx": idx,
+                "key": stable,
+                "business": key,
+                "name": ident["tags"].get("name")
+                        or BUSINESSES[key]["display"],
+                "centroid": [ce, cn],
+                "ring": ring,
+                "bbox": bbox,
+                "entrance": _entrance_point(ring, ce, cn, access),
+                "axis_deg": _dominant_axis_deg(ring),
+                "layout": BUSINESSES[key]["layout"],
+            }
+            self.instances.append(inst)
+            inst_by_idx[idx] = inst
 
         building = BandedGrid(bounds, resolution_m, np.uint8)
         levels_grid = BandedGrid(bounds, resolution_m, np.uint8)
         id_grid = BandedGrid(bounds, resolution_m, np.uint16)
         roof_grid = BandedGrid(bounds, resolution_m, np.int16)
+        business_grid = BandedGrid(bounds, resolution_m, np.uint8)
+        interior_grid = BandedGrid(bounds, resolution_m, np.uint8)
         # Polygons need no context margin — there is no distance field.
         for r0, r1, w0, w1, wt in building.band_windows(margin_m=0.0):
             wrect = building.window_rect(w0, w1)
@@ -599,21 +733,42 @@ class BuildingSource:
                 win_b = cls_lut[win_idx]
                 win_l = lvl_lut[win_idx]
                 win_r = roof_lut[win_idx]
+                win_bus = bus_lut[win_idx]
+                # Phase 20: interior zones for business footprints whose
+                # registry entry names a layout. Zone assignment runs on
+                # the polygon's own cells in its entrance-anchored frame.
+                win_zone = np.zeros((w1 - w0, building.width),
+                                    dtype=np.uint8)
+                for idx in np.unique(win_idx):
+                    inst = inst_by_idx.get(int(idx))
+                    if inst is None or not supports_layout(inst["layout"]):
+                        continue
+                    mask = win_idx == idx
+                    rows, cols = np.nonzero(mask)
+                    es = wt.c + (cols + 0.5) * wt.a
+                    ns = wt.f + (rows + 0.5) * wt.e
+                    win_zone[mask] = zone_field(inst, es, ns)
             else:
                 win_b = np.zeros((w1 - w0, building.width), dtype=np.uint8)
                 win_l = np.zeros((w1 - w0, building.width), dtype=np.uint8)
                 win_id = np.zeros((w1 - w0, building.width), dtype=np.uint16)
                 win_r = np.full((w1 - w0, building.width), NODATA,
                                 dtype=np.int16)
+                win_bus = np.zeros((w1 - w0, building.width), dtype=np.uint8)
+                win_zone = np.zeros((w1 - w0, building.width), dtype=np.uint8)
             building.commit(r0, r1, w0, win_b)
             levels_grid.commit(r0, r1, w0, win_l)
             id_grid.commit(r0, r1, w0, win_id)
             roof_grid.commit(r0, r1, w0, win_r)
+            business_grid.commit(r0, r1, w0, win_bus)
+            interior_grid.commit(r0, r1, w0, win_zone)
 
         self._building = building
         self._levels = levels_grid
         self._ids = id_grid
         self._roofs = roof_grid
+        self._business = business_grid
+        self._interior = interior_grid
 
     @staticmethod
     def _roof_y(ring: list[tuple[float, float]], levels: int,
@@ -673,3 +828,56 @@ class BuildingSource:
         """Uniform roof top block-Y at geo coords; NODATA when unsolved."""
         cell = self._cell(east, north)
         return NODATA if cell is None else int(self._roofs[cell])
+
+    def business_at(self, east: float, north: float) -> int:
+        """Business registry id at geo coords; 0 = not a known business."""
+        cell = self._cell(east, north)
+        return 0 if cell is None else int(self._business[cell])
+
+    def interior_zone(self, east: float, north: float) -> int:
+        """Interior zone id at geo coords; 0 = none (Phase 20)."""
+        cell = self._cell(east, north)
+        return 0 if cell is None else int(self._interior[cell])
+
+    def businesses_doc(self) -> dict:
+        """The dataset's businesses.json sidecar content (Phase 19).
+
+        Registry section is emitted verbatim so the runtime can resolve
+        palettes/layouts by id; instances carry the solved entrance and
+        axis the interior/module passes consume.
+        """
+        return {
+            "businesses": registry_doc(),
+            "instances": {
+                inst["key"]: {
+                    "business": inst["business"],
+                    "name": inst["name"],
+                    "entrance": inst["entrance"],
+                    "axis_deg": inst["axis_deg"],
+                }
+                for inst in self.instances
+            },
+        }
+
+    def business_signs(self) -> list[dict]:
+        """Pylon-sign records appended to signs.json (Phase 19).
+
+        Each known business gets one freestanding sign offset outward
+        from its entrance edge, facing back along the street side.
+        """
+        out = []
+        for inst in self.instances:
+            ex, ey = inst["entrance"]
+            cx, cy = inst["centroid"]
+            dx, dy = ex - cx, ey - cy
+            d = math.hypot(dx, dy)
+            ux, uy = (dx / d, dy / d) if d > 0 else (0.0, -1.0)
+            bearing = math.degrees(math.atan2(dx, -dy))  # 0 = north(-z)
+            out.append({
+                "e": ex + ux * 12.0,
+                "n": ey + uy * 12.0,
+                "type": "business_pylon",
+                "lines": [inst["name"]],
+                "rot": int(round(bearing / 22.5)) % 16,
+            })
+        return out
