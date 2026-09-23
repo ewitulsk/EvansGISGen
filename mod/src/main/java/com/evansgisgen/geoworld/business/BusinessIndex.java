@@ -3,10 +3,13 @@ package com.evansgisgen.geoworld.business;
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import com.evansgisgen.geoworld.geo.GeoDataset;
+import com.google.gson.JsonArray;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import net.minecraft.core.HolderGetter;
 import net.minecraft.core.registries.Registries;
@@ -29,7 +32,8 @@ public final class BusinessIndex {
     private static final Logger LOGGER = LoggerFactory.getLogger(BusinessIndex.class);
     private static final Gson GSON = new Gson();
 
-    public static final BusinessIndex EMPTY = new BusinessIndex(Map.of(), Map.of());
+    public static final BusinessIndex EMPTY =
+            new BusinessIndex(Map.of(), Map.of(), List.of());
 
     /**
      * Facade spec for a business. Null components inherit the class
@@ -40,12 +44,33 @@ public final class BusinessIndex {
                          @Nullable String accentY, @Nullable BlockState floor,
                          @Nullable BlockState roof, @Nullable BlockState window) {}
 
+    /** A solved business entrance in block coords (Phase 20 door carving). */
+    public record Entrance(int x, int z, String name) {}
+
     private final Map<Integer, Facade> facades;
     private final Map<Integer, String> layouts;
+    private final List<Entrance> entrances;
 
-    private BusinessIndex(Map<Integer, Facade> facades, Map<Integer, String> layouts) {
+    private BusinessIndex(Map<Integer, Facade> facades,
+            Map<Integer, String> layouts, List<Entrance> entrances) {
         this.facades = facades;
         this.layouts = layouts;
+        this.entrances = entrances;
+    }
+
+    /** Entrances whose doorway could touch this chunk (8-block margin). */
+    public List<Entrance> entrancesInChunk(int chunkX, int chunkZ) {
+        int x0 = chunkX * 16 - 8;
+        int x1 = chunkX * 16 + 24;
+        int z0 = chunkZ * 16 - 8;
+        int z1 = chunkZ * 16 + 24;
+        List<Entrance> out = new ArrayList<>();
+        for (Entrance e : entrances) {
+            if (e.x() >= x0 && e.x() <= x1 && e.z() >= z0 && e.z() <= z1) {
+                out.add(e);
+            }
+        }
+        return out;
     }
 
     public boolean isEmpty() {
@@ -78,6 +103,21 @@ public final class BusinessIndex {
             JsonObject doc = GSON.fromJson(Files.readString(file), JsonObject.class);
             Map<Integer, Facade> facades = new HashMap<>();
             Map<Integer, String> layouts = new HashMap<>();
+            List<Entrance> entrances = new ArrayList<>();
+            JsonObject insts = doc.has("instances")
+                    ? doc.getAsJsonObject("instances") : new JsonObject();
+            for (String key : insts.keySet()) {
+                JsonObject inst = insts.getAsJsonObject(key);
+                if (!inst.has("entrance")) {
+                    continue;
+                }
+                var ent = inst.getAsJsonArray("entrance");
+                entrances.add(new Entrance(
+                        dataset.blockX(ent.get(0).getAsDouble()),
+                        dataset.blockZ(ent.get(1).getAsDouble()),
+                        inst.has("name") ? inst.get("name").getAsString()
+                                : key));
+            }
             JsonObject reg = doc.has("businesses")
                     ? doc.getAsJsonObject("businesses") : new JsonObject();
             for (String key : reg.keySet()) {
@@ -99,9 +139,9 @@ public final class BusinessIndex {
                     layouts.put(id, b.get("layout").getAsString());
                 }
             }
-            LOGGER.info("Loaded {} business facade entries from {}",
-                    facades.size(), file);
-            return new BusinessIndex(facades, layouts);
+            LOGGER.info("Loaded {} business facade entries, {} entrances from {}",
+                    facades.size(), entrances.size(), file);
+            return new BusinessIndex(facades, layouts, entrances);
         } catch (IOException | RuntimeException e) {
             LOGGER.warn("Failed to read businesses {}: {}", file, e.toString());
             return EMPTY;

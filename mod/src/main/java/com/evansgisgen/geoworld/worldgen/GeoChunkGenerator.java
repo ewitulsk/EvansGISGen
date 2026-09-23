@@ -939,6 +939,10 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
         int minY = getMinY();
         int topY = minY + getGenDepth() - 1;
         BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+        // Phase 20: business entrances get carved doorways — a player can
+        // always walk in off the street.
+        List<BusinessIndex.Entrance> doors =
+                businesses.entrancesInChunk(chunkPos.x, chunkPos.z);
         boolean modified = false;
         for (int lx = 0; lx < 16; lx++) {
             for (int lz = 0; lz < 16; lz++) {
@@ -1005,6 +1009,21 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
                             || dataset.buildingClassAt(x, z - 1) == BUILDING_NONE;
                 }
                 if (edge) {
+                    // Doorway: wall columns within ~2 blocks of a solved
+                    // entrance open for three courses above the floor.
+                    boolean doorway = false;
+                    if (facade != null) {
+                        for (BusinessIndex.Entrance ent : doors) {
+                            if (Math.abs(ent.x() - x) <= 2
+                                    && Math.abs(ent.z() - z) <= 2
+                                    && (ent.x() - x) * (ent.x() - x)
+                                            + (ent.z() - z) * (ent.z() - z)
+                                            <= 4) {
+                                doorway = true;
+                                break;
+                            }
+                        }
+                    }
                     for (int y = base - FOUNDATION_DEPTH; y < roof; y++) {
                         if (y <= minY) {
                             continue;
@@ -1015,6 +1034,10 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
                             if (cur.isAir() || !cur.getFluidState().isEmpty()) {
                                 chunk.setBlockState(pos, palette.wall(), false);
                             }
+                            continue;
+                        }
+                        if (doorway && y > base && y <= base + 3) {
+                            chunk.setBlockState(pos, AIR, false);
                             continue;
                         }
                         // Window pattern: glass on a diagonal grid through the
