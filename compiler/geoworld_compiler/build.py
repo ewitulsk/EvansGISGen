@@ -317,6 +317,15 @@ def build_dataset(
             import json
             (out / "businesses.json").write_text(json.dumps(doc))
             print(f"businesses: {len(doc['instances'])} known instances")
+            # Phase 21: interior modules — v1 NBTs generated here, plus a
+            # placements sidecar the runtime stamps chunk-clamped.
+            from .modules import module_placements, modules_doc, write_module_nbts
+            placements = module_placements(buildings)
+            if placements:
+                write_module_nbts(out)
+                (out / "modules.json").write_text(
+                    json.dumps(modules_doc(placements)))
+                print(f"modules: {len(placements)} placements")
     if signs:
         import json
         (out / "signs.json").write_text(json.dumps({"signs": signs}))

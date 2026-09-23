@@ -4,6 +4,7 @@ import com.evansgisgen.geoworld.GeoWorldMod;
 import com.evansgisgen.geoworld.business.BusinessIndex;
 import com.evansgisgen.geoworld.geo.GeoDataset;
 import com.evansgisgen.geoworld.landmark.LandmarkIndex;
+import com.evansgisgen.geoworld.module.ModuleIndex;
 import com.evansgisgen.geoworld.geo.GeoTile;
 import com.evansgisgen.geoworld.geo.GeoTransform;
 import com.mojang.datafixers.util.Pair;
@@ -726,6 +727,15 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
         // Curated .nbt landmarks place last, sliced to this chunk's bounds
         // (Phase 9) — nothing else may overwrite them.
         landmarks.placeChunk(level, chunk, GeoChunkGenerator::isFeatureOverhang);
+        // Interior modules (Phase 21) stamp inside business shells once
+        // shells and floors exist — never inside a landmark's claim.
+        ModuleIndex modules = businesses(level.registryAccess()).isEmpty()
+                ? ModuleIndex.EMPTY : modules(level.registryAccess());
+        if (!modules.isEmpty()) {
+            modules.placeChunk(level, chunk,
+                    p -> interiorFloorY(chunk, p.getX(), p.getZ(),
+                            landmarks));
+        }
     }
 
     /**
@@ -750,6 +760,55 @@ public final class GeoChunkGenerator extends NoiseBasedChunkGenerator {
             }
         }
         return index;
+    }
+
+    /** Lazily resolves the dataset's modules.json sidecar (Phase 21). */
+    private volatile ModuleIndex moduleIndex;
+
+    public ModuleIndex modules(RegistryAccess registryAccess) {
+        ModuleIndex index = moduleIndex;
+        if (index == null) {
+            synchronized (this) {
+                index = moduleIndex;
+                if (index == null) {
+                    index = dataset.isEmpty()
+                            ? ModuleIndex.EMPTY
+                            : ModuleIndex.load(dataset,
+                                    registryAccess.lookupOrThrow(Registries.BLOCK));
+                    moduleIndex = index;
+                }
+            }
+        }
+        return index;
+    }
+
+    /**
+     * Floor-slab Y at a column — the same per-instance solve
+     * {@link #buildBuildings} uses; returns minY when no building or a
+     * landmark claim covers the column so stray placements are skipped.
+     */
+    private int interiorFloorY(ChunkAccess chunk, int x, int z,
+            LandmarkIndex landmarks) {
+        if (landmarks.suppressesBuildingAt(x, z)) {
+            return getMinY();  // a landmark claims this spot
+        }
+        GeoTile tile = dataset.tileAt(x, z).orElse(null);
+        if (tile == null) {
+            return getMinY();
+        }
+        int tlx = dataset.localCoord(x);
+        int tlz = dataset.localCoord(z);
+        if (tile.buildingClass(tlx, tlz) == BUILDING_NONE) {
+            return getMinY();
+        }
+        int compiledRoof = tile.buildingRoofY(tlx, tlz);
+        if (compiledRoof == GeoTile.NO_DATA) {
+            return getMinY();
+        }
+        int levels = Math.max(1, tile.buildingLevels(tlx, tlz));
+        int topY = getMinY() + getGenDepth() - 1;
+        int roof = Math.min(topY, compiledRoof);
+        return Math.max(getMinY() + 1, roof - levels * 3 - 1);
     }
 
     /**
