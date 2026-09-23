@@ -13,6 +13,7 @@ from __future__ import annotations
 import math
 import os
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 from affine import Affine
@@ -32,12 +33,90 @@ def geom_bbox(geom: dict) -> tuple[float, float, float, float]:
     return (min(es), min(ns), max(es), max(ns))
 
 
+def select_pairs(geoms: list[tuple[tuple[float, float, float, float], dict]],
+                 rect: tuple[float, float, float, float]) -> list[tuple[tuple, dict]]:
+    """(bbox, geom) pairs intersecting `rect`."""
+    return [(b, g) for b, g in geoms if rects_intersect(b, rect)]
+
+
 def select(geoms: list[tuple[tuple[float, float, float, float], dict]],
            rect: tuple[float, float, float, float]) -> list[dict]:
     """Geometries (stored as (bbox, geom) pairs) intersecting `rect` —
     pre-filters features per band so rasterize doesn't walk the whole
     dataset for every window."""
-    return [g for b, g in geoms if rects_intersect(b, rect)]
+    return [g for b, g in select_pairs(geoms, rect)]
+
+
+def sub_window(bboxes: list[tuple[float, float, float, float]],
+               margin_m: float, transform: Affine,
+               shape: tuple[int, int]):
+    """Clip `shape` (rows, cols of the band window) to the union of `bboxes`
+    inflated by `margin_m`. Returns (r0, r1, c0, c1, sub_transform) or None.
+
+    For distance-transform work the margin must cover the field's farthest
+    reach (plus a couple of cells) — then every output cell outside the
+    sub-window is provably zero and the transform stays exact inside it.
+    """
+    if not bboxes:
+        return None
+    e0 = min(b[0] for b in bboxes) - margin_m
+    n0 = min(b[1] for b in bboxes) - margin_m
+    e1 = max(b[2] for b in bboxes) + margin_m
+    n1 = max(b[3] for b in bboxes) + margin_m
+    res = transform.a
+    c0 = max(0, int(math.floor((e0 - transform.c) / res)))
+    c1 = min(shape[1], int(math.ceil((e1 - transform.c) / res)))
+    r0 = max(0, int(math.floor((transform.f - n1) / res)))
+    r1 = min(shape[0], int(math.ceil((transform.f - n0) / res)))
+    if r1 <= r0 or c1 <= c0:
+        return None
+    sub_t = Affine(res, 0.0, transform.c + c0 * res,
+                   0.0, -res, transform.f - r0 * res)
+    return r0, r1, c0, c1, sub_t
+
+
+def run_bands(windows, fn, workers: int = 1) -> None:
+    """Run `fn(r0, r1, w0, w1, window_transform)` over band windows.
+
+    Bands write disjoint grid rows, so `workers` > 1 runs them on a thread
+    pool — rasterio/scipy release the GIL, so EDT- and rasterize-bound
+    bodies scale well.
+    """
+    windows = list(windows)
+    if workers <= 1 or len(windows) <= 1:
+        for w in windows:
+            fn(*w)
+        return
+    with ThreadPoolExecutor(max_workers=min(workers, len(windows))) as ex:
+        list(ex.map(lambda w: fn(*w), windows))
+
+
+def gather2d(grid, e0: float, n1: float, res: float,
+             east: np.ndarray, north: np.ndarray, fill):
+    """Sample `grid` at cell centers -> an (H, W) array.
+
+    `east` (W,) and `north` (H,) are geo-meter coordinates, `e0`/`n1` the
+    geo coords of the grid's west/north edges. Cells address as
+    floor((e - e0)/res) columns / floor((n1 - n)/res) rows — the same math
+    as the scalar per-cell accessors. Out-of-grid cells read `fill`.
+
+    Takes a strided-view fast path when the request is a contiguous,
+    fully in-bounds block (the common case at hscale == res).
+    """
+    col = np.floor((east - e0) / res).astype(np.int64)
+    row = np.floor((n1 - north) / res).astype(np.int64)
+    ok_c = (col >= 0) & (col < grid.shape[1])
+    ok_r = (row >= 0) & (row < grid.shape[0])
+    if ok_c.all() and ok_r.all() and len(col) > 1 and len(row) > 1 \
+            and (col[1:] - col[:-1] == 1).all() \
+            and (row[1:] - row[:-1] == 1).all():
+        return grid[row[0]:row[-1] + 1, col[0]:col[-1] + 1]
+    r = np.clip(row, 0, grid.shape[0] - 1)
+    c = np.clip(col, 0, grid.shape[1] - 1)
+    out = grid[r[:, None], c[None, :]]
+    if fill is not None:
+        out = np.where(ok_r[:, None] & ok_c[None, :], out, fill)
+    return out
 
 
 class BandedGrid:

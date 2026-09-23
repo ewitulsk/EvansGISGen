@@ -49,7 +49,8 @@ from affine import Affine
 from rasterio.features import rasterize
 from scipy.ndimage import distance_transform_edt
 
-from .banded import BandedGrid, geom_bbox, select
+from .banded import (BandedGrid, gather2d, geom_bbox, run_bands,
+                     select_pairs, sub_window)
 from .transform import Projection
 
 OVERPASS = "https://overpass-api.de/api/interpreter"
@@ -369,7 +370,8 @@ class RoadSource:
     def __init__(self, osm_json_path: str | Path, projection: Projection,
                  bounds: tuple[float, float, float, float],
                  resolution_m: float = 1.0,
-                 elev_m=None, hydro=None, rail_lines=None):
+                 elev_m=None, hydro=None, rail_lines=None,
+                 workers: int = 1):
         data = json.loads(Path(osm_json_path).read_text())
         features = parse_osm_roads(data, projection)
         self.nodes = parse_osm_nodes(data, projection)
@@ -408,8 +410,9 @@ class RoadSource:
         self._road = road
         self._deck_h = deck_h
         self._deck_c = deck_c
+
         # Cross-section reach is <= ~20 m even for tag-widened arterials.
-        for r0, r1, w0, w1, wt in road.band_windows(margin_m=64.0):
+        def _band(r0, r1, w0, w1, wt):
             win = np.zeros((w1 - w0, road.width), dtype=np.uint8)
             wrect = road.window_rect(w0, w1)
             deckmask = np.zeros(win.shape, dtype=bool)
@@ -437,20 +440,27 @@ class RoadSource:
             # bridge way's own band only paints where no deck was emitted,
             # so nothing phantom-paves the ground under a floating span.
             for params in sorted(ground, key=lambda p: p.prio):
-                zone = self._classify(select(ground[params], wrect), params,
-                                      win.shape, wt)
-                if zone is not None:
-                    win[zone > 0] = zone[zone > 0]
+                sub = self._classify(select_pairs(ground[params], wrect),
+                                     params, win.shape, wt)
+                if sub is not None:
+                    sr, sc, zone = sub
+                    w = win[sr, sc]
+                    w[zone > 0] = zone[zone > 0]
             for f, g, _pts, _hh in sorted(elevated,
                                           key=lambda t: t[0].params.prio):
-                zone = self._classify(select([(geom_bbox(g), g)], wrect),
-                                      f.params, win.shape, wt)
-                if zone is not None:
-                    zone = np.where(deckmask, 0, zone)
-                    win[zone > 0] = zone[zone > 0]
+                sub = self._classify(select_pairs([(geom_bbox(g), g)], wrect),
+                                     f.params, win.shape, wt)
+                if sub is not None:
+                    sr, sc, zone = sub
+                    zone = np.where(deckmask[sr, sc], 0, zone)
+                    w = win[sr, sc]
+                    w[zone > 0] = zone[zone > 0]
             road.commit(r0, r1, w0, win)
             deck_h.commit(r0, r1, w0, dh)
             deck_c.commit(r0, r1, w0, dc_cls)
+
+        run_bands(road.band_windows(margin_m=64.0), _band,
+                  max(1, min(workers, 4)))
 
         signs = self._compute_signs(features, self.nodes)
         # Clip to the dataset rect (signs outside just waste the sidecar).
@@ -624,15 +634,30 @@ class RoadSource:
             zone[dc <= p.mark] = ROAD_MARKING
         return zone
 
-    def _classify(self, geoms: list[dict], p: RoadParams,
-                  shape: tuple[int, int], transform: Affine) -> np.ndarray | None:
-        center = rasterize([(g, 1) for g in geoms], out_shape=shape,
-                           transform=transform, fill=0,
+    def _classify(self, pairs: list[tuple[tuple, dict]], p: RoadParams,
+                  shape: tuple[int, int], transform: Affine):
+        """Distance-to-centerline zone raster for (bbox, geom) `pairs`.
+
+        Works in a sub-window clipped to the pairs' union bbox inflated by
+        the cross-section reach — cells beyond that can never classify, so
+        the EDT stays exact while skipping most of the band. Returns
+        (row_slice, col_slice, zone) in window coords, or None."""
+        if not pairs:
+            return None
+        outer = p.half + p.curb + p.walk + p.shoulder
+        sub = sub_window([b for b, _g in pairs],
+                         outer + 2 * self.resolution_m, transform, shape)
+        if sub is None:
+            return None
+        r0, r1, c0, c1, sub_t = sub
+        center = rasterize([(g, 1) for _b, g in pairs],
+                           out_shape=(r1 - r0, c1 - c0),
+                           transform=sub_t, fill=0,
                            all_touched=True, dtype=np.uint8).astype(bool)
         if not center.any():
             return None
         dc = distance_transform_edt(~center, sampling=self.resolution_m)
-        return self._zone_from_dist(dc, p)
+        return (slice(r0, r1), slice(c0, c1), self._zone_from_dist(dc, p))
 
     # -- Signs --------------------------------------------------------------
 
@@ -721,6 +746,25 @@ class RoadSource:
         return signs
 
     # -- Accessors ----------------------------------------------------------
+
+    def _gather(self, grid, east: np.ndarray, north: np.ndarray, fill):
+        return gather2d(grid, self.bounds[0], self.bounds[3],
+                        self.resolution_m, east, north, fill)
+
+    def road_grid(self, east: np.ndarray, north: np.ndarray) -> np.ndarray:
+        """(H, W) u8 road classes for cell-center vectors."""
+        return np.asarray(self._gather(self._road.grid, east, north, 0),
+                          dtype=np.uint8)
+
+    def deck_h_grid(self, east: np.ndarray, north: np.ndarray) -> np.ndarray:
+        """(H, W) float64 deck heights; <=0 = no deck (matches deck_m)."""
+        return np.asarray(self._gather(self._deck_h.grid, east, north, -1.0),
+                          dtype=np.float64)
+
+    def deck_c_grid(self, east: np.ndarray, north: np.ndarray) -> np.ndarray:
+        """(H, W) u8 deck classes for cell-center vectors."""
+        return np.asarray(self._gather(self._deck_c.grid, east, north, 0),
+                          dtype=np.uint8)
 
     def road_class(self, east: float, north: float) -> int:
         """Road surface class at geo coords; ROAD_NONE = no road."""

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -82,6 +83,9 @@ def main(argv: list[str] | None = None) -> int:
                         "geo meters (repeatable) — a second city such as "
                         "Lincoln (Phase 11); influence fades over --ramp "
                         "inside the rect edge")
+    b.add_argument("--jobs", type=int, default=0,
+                   help="tile emit worker threads (default: all cores; "
+                        "1 = sequential)")
 
     fe = sub.add_parser("fetch", help="download DEM rasters from the USGS TNM API")
     fe.add_argument("--bbox", required=True,
@@ -279,6 +283,7 @@ def main(argv: list[str] | None = None) -> int:
         from .build import build_dataset
         from .transform import GeoTransform, Projection
 
+        jobs = args.jobs if args.jobs > 0 else (os.cpu_count() or 1)
         projection = None
         anchor_east = anchor_north = 0.0
         if args.anchor:
@@ -367,7 +372,8 @@ def main(argv: list[str] | None = None) -> int:
                   bounds[2] + TILE_SIZE, bounds[3] + TILE_SIZE)
             if args.hydro:
                 from .hydro import HydroSource
-                hydro = HydroSource(args.hydro, projection, bounds=sb)
+                hydro = HydroSource(args.hydro, projection, bounds=sb,
+                                    workers=jobs)
             if args.roads:
                 from .roads import RoadSource, parse_rail_lines
                 # Deck solving needs the bare-earth DEM (bridge floors),
@@ -379,10 +385,12 @@ def main(argv: list[str] | None = None) -> int:
                         if args.landuse else None)
                 roads = RoadSource(args.roads, projection, bounds=sb,
                                    elev_m=getattr(source, "elevation_m", None),
-                                   hydro=hydro, rail_lines=rail)
+                                   hydro=hydro, rail_lines=rail,
+                                   workers=jobs)
             if args.landuse:
                 from .landuse import LanduseSource
-                landuse = LanduseSource(args.landuse, projection, bounds=sb)
+                landuse = LanduseSource(args.landuse, projection, bounds=sb,
+                                        workers=jobs)
             if args.buildings or args.ms_buildings:
                 from .buildings import BuildingSource
                 buildings = BuildingSource(
@@ -391,12 +399,13 @@ def main(argv: list[str] | None = None) -> int:
                     pois_json_path=args.pois,
                     reclassify_outbuildings=args.reclassify_outbuildings,
                     elev_m=getattr(source, "elevation_m", None),
-                    transform=transform)
+                    transform=transform, workers=jobs)
 
         out = build_dataset(args.out, name=args.name, transform=transform,
                             source=source, projection=projection,
                             hydro=hydro, roads=roads,
-                            landuse=landuse, buildings=buildings)
+                            landuse=landuse, buildings=buildings,
+                            jobs=jobs)
         print(f"wrote dataset: {out}")
         return 0
 

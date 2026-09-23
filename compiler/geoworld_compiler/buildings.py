@@ -39,7 +39,8 @@ from pathlib import Path
 import numpy as np
 from rasterio.features import rasterize
 
-from .banded import BandedGrid, geom_bbox, rects_intersect
+from .banded import (BandedGrid, gather2d, geom_bbox, rects_intersect,
+                     run_bands, sub_window)
 from .tileio import NODATA
 from .transform import GeoTransform, Projection
 
@@ -495,7 +496,8 @@ class BuildingSource:
                  ms_json_path: str | Path | None = None,
                  pois_json_path: str | Path | None = None,
                  reclassify_outbuildings: bool = False,
-                 elev_m=None, transform: GeoTransform | None = None):
+                 elev_m=None, transform: GeoTransform | None = None,
+                 workers: int = 1):
         if osm_json_path is None and ms_json_path is None:
             raise ValueError("BuildingSource needs at least one input")
 
@@ -581,34 +583,41 @@ class BuildingSource:
         levels_grid = BandedGrid(bounds, resolution_m, np.uint8)
         id_grid = BandedGrid(bounds, resolution_m, np.uint16)
         roof_grid = BandedGrid(bounds, resolution_m, np.int16)
+
         # Polygons need no context margin — there is no distance field.
-        for r0, r1, w0, w1, wt in building.band_windows(margin_m=0.0):
+        def _band(r0, r1, w0, w1, wt):
             wrect = building.window_rect(w0, w1)
-            geoms = [(g, idx) for b, g, idx in features
+            geoms = [(b, g, idx) for b, g, idx in features
                      if rects_intersect(b, wrect)]
-            if geoms:
+            win_b = np.zeros((w1 - w0, building.width), dtype=np.uint8)
+            win_l = np.zeros((w1 - w0, building.width), dtype=np.uint8)
+            win_id = np.zeros((w1 - w0, building.width), dtype=np.uint16)
+            win_r = np.full((w1 - w0, building.width), NODATA,
+                            dtype=np.int16)
+            sub = sub_window([b for b, _g, _i in geoms],
+                             2 * resolution_m, wt, win_b.shape)
+            if sub is not None:
+                sr0, sr1, sc0, sc1, sub_t = sub
                 # Rasterize polygon indices (u32 — the footprint count can
                 # exceed the emitted u16 id space), then resolve every
                 # layer through the index-keyed LUTs so all four grids
                 # agree on which polygon painted each cell.
                 win_idx = rasterize(
-                    geoms, out_shape=(w1 - w0, building.width),
-                    transform=wt, fill=0, all_touched=True,
+                    [(g, idx) for _b, g, idx in geoms],
+                    out_shape=(sr1 - sr0, sc1 - sc0),
+                    transform=sub_t, fill=0, all_touched=True,
                     dtype=np.uint32)
-                win_id = id_lut[win_idx]
-                win_b = cls_lut[win_idx]
-                win_l = lvl_lut[win_idx]
-                win_r = roof_lut[win_idx]
-            else:
-                win_b = np.zeros((w1 - w0, building.width), dtype=np.uint8)
-                win_l = np.zeros((w1 - w0, building.width), dtype=np.uint8)
-                win_id = np.zeros((w1 - w0, building.width), dtype=np.uint16)
-                win_r = np.full((w1 - w0, building.width), NODATA,
-                                dtype=np.int16)
+                win_id[sr0:sr1, sc0:sc1] = id_lut[win_idx]
+                win_b[sr0:sr1, sc0:sc1] = cls_lut[win_idx]
+                win_l[sr0:sr1, sc0:sc1] = lvl_lut[win_idx]
+                win_r[sr0:sr1, sc0:sc1] = roof_lut[win_idx]
             building.commit(r0, r1, w0, win_b)
             levels_grid.commit(r0, r1, w0, win_l)
             id_grid.commit(r0, r1, w0, win_id)
             roof_grid.commit(r0, r1, w0, win_r)
+
+        run_bands(building.band_windows(margin_m=0.0), _band,
+                  max(1, min(workers, 4)))
 
         self._building = building
         self._levels = levels_grid
@@ -653,6 +662,30 @@ class BuildingSource:
         if row < 0 or col < 0 or row >= self._shape[0] or col >= self._shape[1]:
             return None
         return row, col
+
+    def _gather(self, grid, east: np.ndarray, north: np.ndarray, fill):
+        return gather2d(grid, self.bounds[0], self.bounds[3],
+                        self.resolution_m, east, north, fill)
+
+    def building_grid(self, east: np.ndarray, north: np.ndarray) -> np.ndarray:
+        """(H, W) u8 building classes for cell-center vectors."""
+        return np.asarray(self._gather(self._building.grid, east, north, 0),
+                          dtype=np.uint8)
+
+    def levels_grid(self, east: np.ndarray, north: np.ndarray) -> np.ndarray:
+        """(H, W) u8 floor counts for cell-center vectors."""
+        return np.asarray(self._gather(self._levels.grid, east, north, 0),
+                          dtype=np.uint8)
+
+    def id_grid(self, east: np.ndarray, north: np.ndarray) -> np.ndarray:
+        """(H, W) u16 footprint ids for cell-center vectors."""
+        return np.asarray(self._gather(self._ids.grid, east, north, 0),
+                          dtype=np.uint16)
+
+    def roof_grid(self, east: np.ndarray, north: np.ndarray) -> np.ndarray:
+        """(H, W) i16 roof top block-Y; NODATA when unsolved."""
+        return np.asarray(self._gather(self._roofs.grid, east, north, NODATA),
+                          dtype=np.int16)
 
     def building_class(self, east: float, north: float) -> int:
         """Building class at geo coords; BUILDING_NONE = no footprint."""

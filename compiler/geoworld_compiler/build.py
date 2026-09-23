@@ -1,10 +1,23 @@
-"""Dataset build: sample sources per block column, emit .gwt tiles + manifest."""
+"""Dataset build: sample sources per block column, emit .gwt tiles + manifest.
+
+The emit loop is vectorized: every source exposes a `*_grid(east, north)`
+sampler returning an (H, W) array for the tile's cell-center coordinate
+vectors, so a tile costs a handful of numpy ops instead of 65k Python-level
+per-cell queries. Tiles are independent, so `jobs` threads compile them
+concurrently — the source grids are read-only memmaps and numpy/zlib both
+release the GIL, so threads scale well.
+"""
 
 from __future__ import annotations
 
 import math
+import os
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from pathlib import Path
 from typing import Protocol
+
+import numpy as np
 
 from .manifest import write_manifest
 from .tileio import (NODATA, TILE_SIZE, pack_bitset, pack_elevation, pack_u16,
@@ -13,10 +26,21 @@ from .transform import GeoTransform, Projection
 
 
 class Source(Protocol):
-    """Elevation/influence provider in dataset geo space (see sources.py)."""
+    """Elevation/influence provider in dataset geo space (see sources.py).
+
+    The `*_grid` methods take 1-D cell-center coordinate vectors `east`
+    (W,) and `north` (H,) in geo meters and return (H, W) arrays —
+    the vectorized twins of the scalar per-point accessors.
+    """
 
     def elevation_m(self, east: float, north: float) -> float | None: ...
     def influence(self, east: float, north: float) -> float: ...
+    def elevation_grid(self, east: np.ndarray, north: np.ndarray) -> np.ndarray:
+        """(H, W) float64 elevation meters; NaN = no data."""
+        ...
+    def influence_grid(self, east: np.ndarray, north: np.ndarray) -> np.ndarray:
+        """(H, W) float64 influence weights 0..1."""
+        ...
     def bounds(self) -> tuple[float, float, float, float]: ...
     def may_claim(self, rect: tuple[float, float, float, float]) -> bool: ...
 
@@ -25,6 +49,9 @@ class Hydro(Protocol):
     """Channel-depth provider in geo space (see hydro.py)."""
 
     def depth_m(self, east: float, north: float) -> float: ...
+    def depth_grid(self, east: np.ndarray, north: np.ndarray) -> np.ndarray:
+        """(H, W) float64 channel depth meters; 0 = dry."""
+        ...
 
 
 class Roads(Protocol):
@@ -33,12 +60,18 @@ class Roads(Protocol):
     def road_class(self, east: float, north: float) -> int: ...
     def deck_m(self, east: float, north: float) -> float: ...
     def deck_class(self, east: float, north: float) -> int: ...
+    def road_grid(self, east: np.ndarray, north: np.ndarray) -> np.ndarray: ...
+    def deck_h_grid(self, east: np.ndarray, north: np.ndarray) -> np.ndarray:
+        """(H, W) float64 deck-top meters; <=0 = no deck."""
+        ...
+    def deck_c_grid(self, east: np.ndarray, north: np.ndarray) -> np.ndarray: ...
 
 
 class Landuse(Protocol):
     """Surface-class provider in geo space (see landuse.py)."""
 
     def surface_class(self, east: float, north: float) -> int: ...
+    def surface_grid(self, east: np.ndarray, north: np.ndarray) -> np.ndarray: ...
 
 
 class Buildings(Protocol):
@@ -48,6 +81,129 @@ class Buildings(Protocol):
     def building_levels(self, east: float, north: float) -> int: ...
     def building_id(self, east: float, north: float) -> int: ...
     def building_roof(self, east: float, north: float) -> int: ...
+    def building_grid(self, east: np.ndarray, north: np.ndarray) -> np.ndarray: ...
+    def levels_grid(self, east: np.ndarray, north: np.ndarray) -> np.ndarray: ...
+    def id_grid(self, east: np.ndarray, north: np.ndarray) -> np.ndarray: ...
+    def roof_grid(self, east: np.ndarray, north: np.ndarray) -> np.ndarray: ...
+
+
+def _tile_rect(transform: GeoTransform, tx: int, tz: int):
+    """Geo rect covered by tile (tx, tz) — the may_claim probe rect."""
+    return (transform.east_meters(tx * TILE_SIZE),
+            transform.north_meters(tz * TILE_SIZE + TILE_SIZE),
+            transform.east_meters(tx * TILE_SIZE + TILE_SIZE),
+            transform.north_meters(tz * TILE_SIZE))
+
+
+def _block_y(v: np.ndarray, transform: GeoTransform) -> np.ndarray:
+    """Vectorized GeoTransform.block_y — same float64 op order."""
+    return np.floor((v - transform.datum_elevation_meters)
+                    / transform.vertical_meters_per_block + 0.5) \
+        + transform.datum_y
+
+
+def _emit_tile(coord: tuple[int, int], *, transform: GeoTransform,
+               source: Source, hydro: Hydro | None, roads: Roads | None,
+               landuse: Landuse | None, buildings: Buildings | None,
+               tiles_dir: Path) -> tuple[bool, bool, bool, bool, bool, bool]:
+    """Compile and write one tile. Returns
+    (wrote, any_water, any_road, any_deck, any_surface, any_building)."""
+    tx, tz = coord
+    xs = tx * TILE_SIZE + np.arange(TILE_SIZE)
+    zs = tz * TILE_SIZE + np.arange(TILE_SIZE)
+    # Cell-center geo coords — same expressions as east_meters/north_meters.
+    east = (xs - transform.origin_x) * transform.horizontal_meters_per_block
+    north = (transform.origin_z - zs) * transform.horizontal_meters_per_block
+
+    empty = (False, False, False, False, False, False)
+
+    w = source.influence_grid(east, north)
+    live = w > 0.0
+    if not live.any():
+        return empty
+    elev = source.elevation_grid(east, north)
+    valid = live & ~np.isnan(elev)
+    if not valid.any():
+        # Every claimable column has no source data -> pure vanilla tile.
+        return empty
+
+    surf_y = _block_y(elev, transform)
+    elevation = np.where(valid, surf_y, NODATA)
+
+    any_water = False
+    water_depth = None
+    if hydro is not None:
+        depth = hydro.depth_grid(east, north)
+        bed_y = _block_y(elev - depth, transform)
+        dblk = surf_y - bed_y
+        carve = valid & (depth > 0.0) & (dblk > 0.0)
+        if carve.any():
+            # Bake the riverbed into elevation: water surface - channel
+            # depth = bed; the runtime fills water bed+1 .. bed+depth.
+            any_water = True
+            elevation = np.where(carve, bed_y, elevation)
+            water_depth = np.where(carve, np.minimum(255.0, dblk), 0.0)
+            water_depth = water_depth.astype(np.uint8)
+
+    any_road = any_deck = False
+    road = roadz = roade = None
+    if roads is not None:
+        road = np.where(valid, roads.road_grid(east, north), 0)
+        road = road.astype(np.uint8)
+        any_road = bool((road != 0).any())
+        dh = roads.deck_h_grid(east, north)
+        deck = valid & (dh > 0.0)
+        if deck.any():
+            any_deck = True
+            roadz = np.where(deck, _block_y(dh, transform), NODATA)
+            roade = np.where(deck, roads.deck_c_grid(east, north), 0)
+            roade = roade.astype(np.uint8)
+
+    any_surface = False
+    surface = None
+    if landuse is not None:
+        surface = np.where(valid, landuse.surface_grid(east, north), 0)
+        surface = surface.astype(np.uint8)
+        any_surface = bool((surface != 0).any())
+
+    any_building = False
+    building = b_levels = b_id = b_roof = None
+    if buildings is not None:
+        bc = buildings.building_grid(east, north)
+        bmask = valid & (bc != 0)
+        if bmask.any():
+            any_building = True
+            building = np.where(bmask, bc, 0).astype(np.uint8)
+            b_levels = np.where(bmask, buildings.levels_grid(east, north), 0)
+            b_levels = b_levels.astype(np.uint8)
+            b_id = np.where(bmask, buildings.id_grid(east, north), 0)
+            b_id = b_id.astype(np.uint16)
+            b_roof = np.where(bmask, buildings.roof_grid(east, north), NODATA)
+            b_roof = b_roof.astype(np.int16)
+
+    influence = np.where(
+        valid, np.clip(np.floor(w * 255.0 + 0.5), 0.0, 255.0), 0.0)
+    influence = influence.astype(np.uint8)
+
+    layers = {"elevation": pack_elevation(elevation.astype(np.int16)),
+              "influence": influence.tobytes()}
+    if any_surface:
+        layers["surface"] = surface.tobytes()
+    if any_water:
+        layers["water"] = pack_bitset(water_depth != 0)
+        layers["water_depth"] = water_depth.tobytes()
+    if any_road:
+        layers["road"] = road.tobytes()
+    if any_deck:
+        layers["roadz"] = pack_elevation(roadz.astype(np.int16))
+        layers["roade"] = roade.tobytes()
+    if any_building:
+        layers["building"] = building.tobytes()
+        layers["building_levels"] = b_levels.tobytes()
+        layers["building_id"] = pack_u16(b_id)
+        layers["building_roof"] = pack_elevation(b_roof)
+    write_tile(tiles_dir / tile_filename(tx, tz), tx, tz, layers)
+    return True, any_water, any_road, any_deck, any_surface, any_building
 
 
 def build_dataset(
@@ -61,6 +217,7 @@ def build_dataset(
     roads: Roads | None = None,
     landuse: Landuse | None = None,
     buildings: Buildings | None = None,
+    jobs: int = 1,
 ) -> Path:
     """Emit a .geoworld dataset directory. Returns the dataset dir."""
     out = Path(out_dir)
@@ -78,122 +235,41 @@ def build_dataset(
     t_min_z = math.floor(bz0 / TILE_SIZE)
     t_max_z = math.floor(bz1 / TILE_SIZE)
 
+    # Whole-tile reject up front: a tile the influence field cannot claim is
+    # pure vanilla — skip it without any per-cell work. (Bounds-spanning
+    # datasets like Beatrice+Lincoln are mostly empty space between claimed
+    # regions.)
+    coords = [(tx, tz)
+              for tx in range(t_min_x, t_max_x + 1)
+              for tz in range(t_min_z, t_max_z + 1)
+              if source.may_claim(_tile_rect(transform, tx, tz))]
+
     written: list[tuple[int, int]] = []
-    any_water = False
-    any_road = False
-    any_deck = False
-    any_surface = False
-    any_building = False
-    n = TILE_SIZE * TILE_SIZE
-    for tx in range(t_min_x, t_max_x + 1):
-        for tz in range(t_min_z, t_max_z + 1):
-            # Whole-tile reject: a tile the influence field cannot claim is
-            # pure vanilla — skip it without 65k per-cell field queries.
-            # (Bounds-spanning datasets like Beatrice+Lincoln are mostly
-            # empty space between claimed regions.)
-            tile_rect = (transform.east_meters(tx * TILE_SIZE),
-                         transform.north_meters(tz * TILE_SIZE + TILE_SIZE),
-                         transform.east_meters(tx * TILE_SIZE + TILE_SIZE),
-                         transform.north_meters(tz * TILE_SIZE))
-            if not source.may_claim(tile_rect):
-                continue
-            elevation = [NODATA] * n
-            influence = bytearray(n)
-            surface = bytearray(n)
-            water_depth = bytearray(n)
-            road = bytearray(n)
-            roadz = [NODATA] * n
-            roade = bytearray(n)
-            building = bytearray(n)
-            b_levels = bytearray(n)
-            b_id = [0] * n
-            b_roof = [NODATA] * n
-            any_influence = False
-            any_tile_water = False
-            any_tile_road = False
-            any_tile_deck = False
-            any_tile_surface = False
-            any_tile_building = False
-            for lz in range(TILE_SIZE):
-                bz = tz * TILE_SIZE + lz
-                north = transform.north_meters(bz)
-                for lx in range(TILE_SIZE):
-                    bx = tx * TILE_SIZE + lx
-                    east = transform.east_meters(bx)
-                    w = source.influence(east, north)
-                    if w <= 0.0:
-                        continue  # vanilla column — no layers to paint
-                    elev = source.elevation_m(east, north)
-                    if elev is None:
-                        # No-data columns are pure vanilla regardless of influence.
-                        continue
-                    i = lz * TILE_SIZE + lx
-                    elevation[i] = transform.block_y(elev)
-                    if hydro is not None:
-                        depth_m = hydro.depth_m(east, north)
-                        if depth_m > 0.0:
-                            # Bake the riverbed into elevation: LiDAR
-                            # water surface - channel depth = bed. The
-                            # runtime fills water bed+1 .. bed+depth.
-                            surface_y = transform.block_y(elev)
-                            bed_y = transform.block_y(elev - depth_m)
-                            depth_blocks = surface_y - bed_y
-                            if depth_blocks > 0:
-                                elevation[i] = bed_y
-                                water_depth[i] = min(255, depth_blocks)
-                                any_tile_water = True
-                    if roads is not None:
-                        rc = roads.road_class(east, north)
-                        if rc:
-                            road[i] = rc
-                            any_tile_road = True
-                        dm = roads.deck_m(east, north)
-                        if dm > 0.0:
-                            roadz[i] = transform.block_y(dm)
-                            roade[i] = roads.deck_class(east, north)
-                            any_tile_deck = True
-                    if landuse is not None:
-                        sc = landuse.surface_class(east, north)
-                        if sc:
-                            surface[i] = sc
-                            any_tile_surface = True
-                    if buildings is not None:
-                        bc = buildings.building_class(east, north)
-                        if bc:
-                            building[i] = bc
-                            b_levels[i] = buildings.building_levels(east, north)
-                            b_id[i] = buildings.building_id(east, north)
-                            b_roof[i] = buildings.building_roof(east, north)
-                            any_tile_building = True
-                    influence[i] = min(255, max(0, int(w * 255.0 + 0.5)))
-                    any_influence = True
-            if any_influence:
-                layers = {"elevation": pack_elevation(elevation),
-                          "influence": bytes(influence)}
-                if any_tile_surface:
-                    layers["surface"] = bytes(surface)
-                if any_tile_water:
-                    layers["water"] = pack_bitset([1 if d else 0 for d in water_depth])
-                    layers["water_depth"] = bytes(water_depth)
-                if any_tile_road:
-                    layers["road"] = bytes(road)
-                if any_tile_deck:
-                    layers["roadz"] = pack_elevation(roadz)
-                    layers["roade"] = bytes(roade)
-                if any_tile_building:
-                    layers["building"] = bytes(building)
-                    layers["building_levels"] = bytes(b_levels)
-                    layers["building_id"] = pack_u16(b_id)
-                    layers["building_roof"] = pack_elevation(b_roof)
-                write_tile(tiles_dir / tile_filename(tx, tz), tx, tz, layers)
+    any_water = any_road = any_deck = any_surface = any_building = False
+
+    emit = partial(_emit_tile, transform=transform, source=source,
+                   hydro=hydro, roads=roads, landuse=landuse,
+                   buildings=buildings, tiles_dir=tiles_dir)
+    if jobs > 1:
+        pool = ThreadPoolExecutor(max_workers=jobs)
+        results = pool.map(emit, coords)
+    else:
+        results = map(emit, coords)
+    try:
+        for (tx, tz), res in zip(coords, results):
+            wrote, tw, tr, td, ts, tb = res
+            if wrote:
                 written.append((tx, tz))
-                any_water = any_water or any_tile_water
-                any_road = any_road or any_tile_road
-                any_deck = any_deck or any_tile_deck
-                any_surface = any_surface or any_tile_surface
-                any_building = any_building or any_tile_building
-            print(f"  tile {tx:+d},{tz:+d}: {'written' if any_influence else 'skipped'}",
-                  flush=True)
+                any_water |= tw
+                any_road |= tr
+                any_deck |= td
+                any_surface |= ts
+                any_building |= tb
+            print(f"  tile {tx:+d},{tz:+d}: "
+                  f"{'written' if wrote else 'skipped'}", flush=True)
+    finally:
+        if jobs > 1:
+            pool.shutdown()
 
     layers = (["elevation", "influence"]
               + (["surface"] if any_surface else [])

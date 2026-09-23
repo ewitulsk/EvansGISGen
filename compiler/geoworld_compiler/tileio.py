@@ -10,6 +10,8 @@ import struct
 import zlib
 from pathlib import Path
 
+import numpy as np
+
 MAGIC = b"GWTL"
 VERSION = 1
 TILE_SIZE = 256
@@ -38,47 +40,32 @@ LAYER_BITS = {
 _LAYER_ORDER = sorted(LAYER_BITS, key=LAYER_BITS.get)
 
 
-def pack_elevation(ints: list[int] | tuple[int, ...]) -> bytes:
+def pack_elevation(ints) -> bytes:
     """Pack 65536 block-Y values into big-endian int16."""
-    import array
-
-    a = array.array("h", ints)  # native int16
-    if struct.pack("=h", 1) != struct.pack(">h", 1):  # little-endian host
-        a.byteswap()
-    return a.tobytes()
+    return np.asarray(ints, dtype=">i2").tobytes()
 
 
-def pack_u16(ints: list[int] | tuple[int, ...]) -> bytes:
+def pack_u16(ints) -> bytes:
     """Pack 65536 values into big-endian uint16 (building instance ids)."""
-    import array
-
-    a = array.array("H", ints)  # native uint16
-    if struct.pack("=H", 1) != struct.pack(">H", 1):  # little-endian host
-        a.byteswap()
-    return a.tobytes()
+    return np.asarray(ints, dtype=">u2").tobytes()
 
 
-def pack_bitset(bits: bytes | bytearray | list[int] | tuple[int, ...]) -> bytes:
+def pack_bitset(bits) -> bytes:
     """Pack per-column booleans (len TILE_SIZE^2) into a big-endian bitset.
 
     Bit i (column i) lives in byte i//8 at bit i%8 (LSB-first within a byte).
     """
     n = TILE_SIZE * TILE_SIZE
-    if len(bits) != n:
+    bits = np.asarray(bits)
+    if bits.size != n:
         raise ValueError(f"bitset source must have {n} entries")
-    out = bytearray(n // 8)
-    for i, v in enumerate(bits):
-        if v:
-            out[i >> 3] |= 1 << (i & 7)
-    return bytes(out)
+    return np.packbits(bits.reshape(-1) != 0, bitorder="little").tobytes()
 
 
 def unpack_bitset(data: bytes) -> bytes:
     """Unpack a bitset payload back into one 0/1 byte per column."""
-    out = bytearray(TILE_SIZE * TILE_SIZE)
-    for i in range(len(out)):
-        out[i] = (data[i >> 3] >> (i & 7)) & 1
-    return bytes(out)
+    return np.unpackbits(np.frombuffer(data, np.uint8),
+                         bitorder="little").tobytes()
 
 
 def _section(payload: bytes, compress: bool) -> bytes:

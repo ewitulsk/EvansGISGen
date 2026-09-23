@@ -22,9 +22,16 @@ from __future__ import annotations
 import math
 from typing import Protocol, Sequence
 
+import numpy as np
+
 
 def smootherstep(t: float) -> float:
     t = max(0.0, min(1.0, t))
+    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+
+
+def _ss_array(t: np.ndarray) -> np.ndarray:
+    """Vectorized smootherstep — identical float64 op order to smootherstep."""
     return t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
 
 
@@ -33,6 +40,11 @@ class Field(Protocol):
 
     def weight(self, east: float, north: float) -> float:
         """Influence weight 0..1 at geo coordinates (east, north) meters."""
+        ...
+
+    def weights(self, east: np.ndarray, north: np.ndarray) -> np.ndarray:
+        """(H, W) float64 weights for 1-D cell-center vectors `east` (W,)
+        and `north` (H,) — the vectorized twin of `weight`."""
         ...
 
     def bounds(self) -> tuple[float, float, float, float]:
@@ -69,6 +81,11 @@ class BoxRamp:
             return 0.0
         return smootherstep(min(1.0, edge_dist / self.ramp_m))
 
+    def weights(self, east: np.ndarray, north: np.ndarray) -> np.ndarray:
+        edge = self.half_extent_m - np.maximum(np.abs(east)[None, :],
+                                               np.abs(north)[:, None])
+        return _ss_array(np.clip(edge / self.ramp_m, 0.0, 1.0))
+
     def bounds(self) -> tuple[float, float, float, float]:
         e = self.half_extent_m
         return (-e, -e, e, e)
@@ -98,6 +115,14 @@ class RectRamp:
             return 0.0
         return smootherstep(min(1.0, edge_dist / self.ramp_m))
 
+    def weights(self, east: np.ndarray, north: np.ndarray) -> np.ndarray:
+        e = east[None, :]
+        n = north[:, None]
+        e0, n0, e1, n1 = self.rect
+        edge = np.minimum(np.minimum(e - e0, e1 - e),
+                          np.minimum(n - n0, n1 - n))
+        return _ss_array(np.clip(edge / self.ramp_m, 0.0, 1.0))
+
     def bounds(self) -> tuple[float, float, float, float]:
         return self.rect
 
@@ -122,6 +147,13 @@ class DiscRamp:
         if d <= self.full_m:
             return 1.0
         return smootherstep((self.edge_m - d) / (self.edge_m - self.full_m))
+
+    def weights(self, east: np.ndarray, north: np.ndarray) -> np.ndarray:
+        d = np.hypot(east[None, :] - self.center_east,
+                     north[:, None] - self.center_north)
+        t = np.clip((self.edge_m - d) / (self.edge_m - self.full_m),
+                    0.0, 1.0)
+        return _ss_array(t)
 
     def bounds(self) -> tuple[float, float, float, float]:
         return (self.center_east - self.edge_m, self.center_north - self.edge_m,
@@ -184,6 +216,18 @@ class CorridorRamp:
             return 1.0
         return smootherstep(1.0 - (d - self.full_m) / self.ramp_m)
 
+    def weights(self, east: np.ndarray, north: np.ndarray) -> np.ndarray:
+        # Scalar fallback — CorridorRamp is meant to be baked via
+        # corridor_field() before a build; this exists only for correctness
+        # if one is passed to a source directly.
+        ee, nn = np.meshgrid(east, north)
+        out = np.empty(ee.shape, dtype=np.float64)
+        it = np.nditer(ee, flags=["multi_index"])
+        for _ in it:
+            i, j = it.multi_index
+            out[i, j] = self.weight(float(ee[i, j]), float(nn[i, j]))
+        return out
+
     def bounds(self) -> tuple[float, float, float, float]:
         return self._bounds
 
@@ -218,6 +262,17 @@ class RasterField:
                 or col >= self._grid.shape[1]):
             return 0.0
         return self._grid[row, col] * (1.0 / 255.0)
+
+    def weights(self, east: np.ndarray, north: np.ndarray) -> np.ndarray:
+        col = np.floor((east - self._bounds[0]) * self._inv).astype(np.int64)
+        row = np.floor((self._bounds[3] - north) * self._inv).astype(np.int64)
+        ok = ((row >= 0) & (row < self._grid.shape[0]))[:, None] & \
+             ((col >= 0) & (col < self._grid.shape[1]))[None, :]
+        r = np.clip(row, 0, self._grid.shape[0] - 1)
+        c = np.clip(col, 0, self._grid.shape[1] - 1)
+        out = self._grid[r[:, None], c[None, :]].astype(np.float64) \
+            * (1.0 / 255.0)
+        return np.where(ok, out, 0.0)
 
     def bounds(self) -> tuple[float, float, float, float]:
         return self._bounds
@@ -266,21 +321,30 @@ def corridor_field(polylines: Sequence[Sequence[tuple[float, float]]],
 
 def combine_max(*fields: Field) -> Field:
     """A column is geographic if any source claims it (union of fields)."""
-    return _Combined(fields, max)
+    return _Combined(fields, max, "max")
 
 
 def combine_sum(*fields: Field) -> Field:
     """Additive combination, capped at 1 — overlapping claims reinforce."""
-    return _Combined(fields, lambda ws: min(1.0, sum(ws)))
+    return _Combined(fields, lambda ws: min(1.0, sum(ws)), "sum")
 
 
 class _Combined:
-    def __init__(self, fields: tuple[Field, ...], op):
+    def __init__(self, fields: tuple[Field, ...], op, kind: str):
         self._fields = fields
         self._op = op
+        self._kind = kind
 
     def weight(self, east: float, north: float) -> float:
         return self._op(f.weight(east, north) for f in self._fields)
+
+    def weights(self, east: np.ndarray, north: np.ndarray) -> np.ndarray:
+        ws = [f.weights(east, north) for f in self._fields]
+        if not ws:
+            return np.zeros((len(north), len(east)), dtype=np.float64)
+        if self._kind == "max":
+            return np.maximum.reduce(ws)
+        return np.clip(np.sum(np.stack(ws), axis=0), 0.0, 1.0)
 
     def bounds(self) -> tuple[float, float, float, float]:
         bs = [f.bounds() for f in self._fields]

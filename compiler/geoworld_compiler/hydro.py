@@ -32,7 +32,8 @@ from affine import Affine
 from rasterio.features import rasterize
 from scipy.ndimage import distance_transform_edt
 
-from .banded import BandedGrid, geom_bbox, rects_intersect, select
+from .banded import (BandedGrid, gather2d, geom_bbox, rects_intersect,
+                     run_bands, select_pairs, sub_window)
 from .influence import smootherstep
 from .transform import Projection
 
@@ -114,7 +115,8 @@ class HydroSource:
 
     def __init__(self, osm_json_path: str | Path, projection: Projection,
                  bounds: tuple[float, float, float, float],
-                 resolution_m: float = 1.0, bank_m: float = 6.0):
+                 resolution_m: float = 1.0, bank_m: float = 6.0,
+                 workers: int = 1):
         data = json.loads(Path(osm_json_path).read_text())
         lines, areas = parse_osm_water(data, projection)
 
@@ -136,21 +138,29 @@ class HydroSource:
 
         depth = BandedGrid(bounds, resolution_m, np.float32)
         self._depth = depth
+
         # Context must cover the farthest field reach: river half-width (15)
         # + bank ramp (6) for lines, bank_m inside a shoreline for areas.
-        for r0, r1, w0, w1, wt in depth.band_windows(margin_m=32.0):
+        def _band(r0, r1, w0, w1, wt):
             win = np.zeros((w1 - w0, depth.width), dtype=np.float32)
             wrect = depth.window_rect(w0, w1)
 
             # Line features: one EDT per waterway class (half-width is
-            # class-uniform), depth ramps from centerline to bank.
+            # class-uniform), depth ramps from centerline to bank. Each
+            # class works in a sub-window clipped to its visible extent —
+            # cells past half_w + margin can never be wet.
             for cls, (half_w, max_depth) in LINE_CLASSES.items():
-                geoms = select(line_geoms[cls], wrect)
-                if not geoms:
+                pairs = select_pairs(line_geoms[cls], wrect)
+                sub = sub_window([b for b, _g in pairs],
+                                 half_w + 2 * resolution_m, wt, win.shape)
+                if sub is None:
                     continue
-                center = rasterize([(g, 1) for g in geoms],
-                                   out_shape=win.shape, transform=wt, fill=0,
-                                   all_touched=True, dtype=np.uint8).astype(bool)
+                sr0, sr1, sc0, sc1, sub_t = sub
+                center = rasterize([(g, 1) for _b, g in pairs],
+                                   out_shape=(sr1 - sr0, sc1 - sc0),
+                                   transform=sub_t, fill=0,
+                                   all_touched=True,
+                                   dtype=np.uint8).astype(bool)
                 if not center.any():
                     continue
                 # Distance to nearest centerline cell, in meters. The bank
@@ -159,26 +169,34 @@ class HydroSource:
                 dc = distance_transform_edt(~center, sampling=resolution_m)
                 bank = min(bank_m, half_w)
                 inside = np.clip((half_w - dc) / bank, 0.0, 1.0)
-                np.maximum(win, max_depth * _ss_array(inside), out=win)
+                w = win[sr0:sr1, sc0:sc1]
+                np.maximum(w, max_depth * _ss_array(inside), out=w)
 
             # Area features: burn each polygon's max depth (deepest wins),
             # then ramp inside distance to the shoreline.
-            visible = [(g, d) for b, g, d in area_geoms
+            visible = [(b, g, d) for b, g, d in area_geoms
                        if rects_intersect(b, wrect)]
-            if visible:
+            sub = sub_window([b for b, _g, _d in visible],
+                             bank_m + 2 * resolution_m, wt, win.shape)
+            if sub is not None:
+                sr0, sr1, sc0, sc1, sub_t = sub
                 # Sort ascending so deeper water overwrites shallower.
                 area_max = rasterize(
-                    [(g, d) for g, d in sorted(visible, key=lambda t: t[1])],
-                    out_shape=win.shape, transform=wt, fill=0.0,
-                    dtype=np.float32)
+                    [(g, d) for _b, g, d in sorted(visible, key=lambda t: t[2])],
+                    out_shape=(sr1 - sr0, sc1 - sc0), transform=sub_t,
+                    fill=0.0, dtype=np.float32)
                 mask = area_max > 0.0
                 if mask.any():
                     # Distance inside the polygon to its shoreline, in meters.
                     da = distance_transform_edt(mask, sampling=resolution_m)
                     inside = np.clip(da / bank_m, 0.0, 1.0)
-                    np.maximum(win, area_max * _ss_array(inside), out=win)
+                    w = win[sr0:sr1, sc0:sc1]
+                    np.maximum(w, area_max * _ss_array(inside), out=w)
 
             depth.commit(r0, r1, w0, win)
+
+        run_bands(depth.band_windows(margin_m=32.0), _band,
+                  max(1, min(workers, 4)))
 
     @staticmethod
     def _linestring(coords: list[tuple[float, float]]) -> dict:
@@ -195,6 +213,12 @@ class HydroSource:
         if row < 0 or col < 0 or row >= self._shape[0] or col >= self._shape[1]:
             return 0.0
         return float(self._depth[row, col])
+
+    def depth_grid(self, east: np.ndarray, north: np.ndarray) -> np.ndarray:
+        """(H, W) float64 channel depths for cell-center vectors."""
+        out = gather2d(self._depth.grid, self.bounds[0], self.bounds[3],
+                       self.resolution_m, east, north, 0.0)
+        return np.asarray(out, dtype=np.float64)
 
 
 def _ss_array(t: np.ndarray) -> np.ndarray:

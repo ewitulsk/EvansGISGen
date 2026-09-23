@@ -30,7 +30,8 @@ from affine import Affine
 from rasterio.features import rasterize
 from scipy.ndimage import distance_transform_edt
 
-from .banded import BandedGrid, geom_bbox, select
+from .banded import (BandedGrid, gather2d, geom_bbox, run_bands,
+                     select_pairs, sub_window)
 
 from .transform import Projection
 
@@ -121,7 +122,7 @@ class LanduseSource:
 
     def __init__(self, osm_json_path: str | Path, projection: Projection,
                  bounds: tuple[float, float, float, float],
-                 resolution_m: float = 1.0):
+                 resolution_m: float = 1.0, workers: int = 1):
         data = json.loads(Path(osm_json_path).read_text())
 
         self.bounds = bounds
@@ -160,32 +161,47 @@ class LanduseSource:
 
         surface = BandedGrid(bounds, resolution_m, np.uint8)
         self._surface = surface
+
         # Context must cover the rail buffer reach (RAIL_HALF_WIDTH_M).
-        for r0, r1, w0, w1, wt in surface.band_windows(margin_m=32.0):
+        def _band(r0, r1, w0, w1, wt):
             win = np.zeros((w1 - w0, surface.width), dtype=np.uint8)
             wrect = surface.window_rect(w0, w1)
             for (cls, _prio), pairs in sorted(polys.items(),
                                               key=lambda kv: kv[0][1]):
-                geoms = select(pairs, wrect)
-                if not geoms:
+                visible = select_pairs(pairs, wrect)
+                sub = sub_window([b for b, _g in visible],
+                                 2 * resolution_m, wt, win.shape)
+                if sub is None:
                     continue
-                mask = rasterize([(g, 1) for g in geoms],
-                                 out_shape=win.shape, transform=wt,
-                                 fill=0, all_touched=True, dtype=np.uint8)
-                win[mask.astype(bool)] = cls
+                sr0, sr1, sc0, sc1, sub_t = sub
+                mask = rasterize([(g, 1) for _b, g in visible],
+                                 out_shape=(sr1 - sr0, sc1 - sc0),
+                                 transform=sub_t, fill=0,
+                                 all_touched=True, dtype=np.uint8)
+                w = win[sr0:sr1, sc0:sc1]
+                w[mask.astype(bool)] = cls
 
             # Rail corridors: distance-to-track <= ballast half-width.
-            geoms = select(rail_lines, wrect)
-            if geoms:
-                center = rasterize([(g, 1) for g in geoms],
-                                   out_shape=win.shape, transform=wt,
-                                   fill=0, all_touched=True,
+            visible = select_pairs(rail_lines, wrect)
+            sub = sub_window([b for b, _g in visible],
+                             RAIL_HALF_WIDTH_M + 2 * resolution_m,
+                             wt, win.shape)
+            if sub is not None:
+                sr0, sr1, sc0, sc1, sub_t = sub
+                center = rasterize([(g, 1) for _b, g in visible],
+                                   out_shape=(sr1 - sr0, sc1 - sc0),
+                                   transform=sub_t, fill=0,
+                                   all_touched=True,
                                    dtype=np.uint8).astype(bool)
                 if center.any():
                     dc = distance_transform_edt(~center, sampling=resolution_m)
-                    win[dc <= RAIL_HALF_WIDTH_M] = SURFACE_RAILWAY
+                    win[sr0:sr1, sc0:sc1][dc <= RAIL_HALF_WIDTH_M] = \
+                        SURFACE_RAILWAY
 
             surface.commit(r0, r1, w0, win)
+
+        run_bands(surface.band_windows(margin_m=32.0), _band,
+                  max(1, min(workers, 4)))
 
     def surface_class(self, east: float, north: float) -> int:
         """Surface class at geo coords; SURFACE_NATURAL = unclassified."""
@@ -194,3 +210,9 @@ class LanduseSource:
         if row < 0 or col < 0 or row >= self._shape[0] or col >= self._shape[1]:
             return SURFACE_NATURAL
         return int(self._surface[row, col])
+
+    def surface_grid(self, east: np.ndarray, north: np.ndarray) -> np.ndarray:
+        """(H, W) u8 surface classes for cell-center vectors."""
+        out = gather2d(self._surface.grid, self.bounds[0], self.bounds[3],
+                       self.resolution_m, east, north, 0)
+        return np.asarray(out, dtype=np.uint8)

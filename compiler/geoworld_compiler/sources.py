@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
+
 from .influence import DiscRamp, smootherstep
 
 __all__ = ["SyntheticSource", "smootherstep"]
@@ -40,9 +42,22 @@ class SyntheticSource:
             + 1.5 * math.sin(east / 31.0) * math.sin(north / 27.0)
         )
 
+    def elevation_grid(self, east: np.ndarray, north: np.ndarray) -> np.ndarray:
+        """(H, W) float64 synthetic elevation for cell-center vectors."""
+        ee, nn = np.meshgrid(east, north)
+        return (
+            self.base_elevation_m
+            + 14.0 * np.sin(ee / 340.0) * np.cos(nn / 290.0)
+            + 6.0 * np.sin(ee / 95.0 + 1.3) * np.sin(nn / 120.0 - 0.7)
+            + 1.5 * np.sin(ee / 31.0) * np.sin(nn / 27.0)
+        )
+
     def influence(self, east: float, north: float) -> float:
         """0..1 geographic influence: full inside radius_full, ramp to edge."""
         return self._field.weight(east, north)
+
+    def influence_grid(self, east: np.ndarray, north: np.ndarray) -> np.ndarray:
+        return self._field.weights(east, north)
 
     def bounds(self) -> tuple[float, float, float, float]:
         e = self.radius_edge_m

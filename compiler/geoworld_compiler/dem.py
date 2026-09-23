@@ -16,6 +16,7 @@ import numpy as np
 import rasterio
 from affine import Affine
 
+from .banded import gather2d
 from .tileio import TILE_SIZE
 from pyproj import Transformer
 from rasterio.fill import fillnodata
@@ -162,6 +163,17 @@ class DemSource:
             return None
         v = self._grid[row, col]
         return None if np.isnan(v) else float(v)
+
+    def elevation_grid(self, east: np.ndarray, north: np.ndarray) -> np.ndarray:
+        """(H, W) float64 elevations for cell-center vectors east (W,) /
+        north (H,); NaN outside coverage or at nodata cells."""
+        out = gather2d(self._grid, self._x0, self._y1, self.resolution_m,
+                       self.anchor_east + east, self.anchor_north + north,
+                       np.nan)
+        return np.asarray(out, dtype=np.float64)
+
+    def influence_grid(self, east: np.ndarray, north: np.ndarray) -> np.ndarray:
+        return self._influence_field.weights(east, north)
 
     def influence(self, east: float, north: float) -> float:
         return self._influence_field.weight(east, north)
