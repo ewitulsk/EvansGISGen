@@ -15,6 +15,21 @@
       "rotation": "NONE",
       "terrain": "LEVEL_FOUNDATION",
       "replaces_building": "ms:demo"
+    },
+    {
+      "id": "lab_house",
+      "template": "lab_house.nbt",
+      "position": {
+        "east": 240,
+        "north": -60
+      },
+      "anchor": [
+        0,
+        0,
+        0
+      ],
+      "rotation": "NONE",
+      "terrain": "LEVEL_FOUNDATION"
     }
   ]
 }
