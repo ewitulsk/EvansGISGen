@@ -33,7 +33,9 @@
     "building",
     "building_levels",
     "building_id",
-    "building_roof"
+    "building_roof",
+    "business",
+    "interior"
   ],
   "tile_count": 17652,
   "bounds": {
