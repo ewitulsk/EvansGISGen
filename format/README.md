@@ -90,6 +90,8 @@ then one section per set mask bit, in ascending bit order:
 | 0x200 | roade    | `u8[65536]` deck cross-section class (Phase 13) |
 | 0x400 | building_id | `u16[65536]` footprint instance ids (Phase 15) |
 | 0x800 | building_roof | `i16[65536]` uniform roof top Y (Phase 15) |
+| 0x1000 | business | `u8[65536]` known-business ids (Phase 19) |
+| 0x2000 | interior | `u8[65536]` interior zone ids (Phase 20) |
 
 Bitset packing: bit `i` is bit `i % 8` (LSB-first) of byte `i / 8`.
 
@@ -142,9 +144,26 @@ Notes:
   under a deck keep their `road` classification.
 - `signs.json` (Phase 13): optional sidecar beside `manifest.json` —
   `{"signs": [{"e","n","type","lines","rot"}, ...]}` in geo meters.
-  `type` is `street_name` (intersection blades), `stop`, or `yield`; `rot`
-  is the precomputed `ROTATION_16` facing. Sparse point data, so it lives
-  outside the tile grid.
+  `type` is `street_name` (intersection blades), `stop`, `yield`, or
+  `business_pylon` (Phase 19 — one freestanding pylon per known business,
+  offset outward from its entrance). `rot` is the precomputed
+  `ROTATION_16` facing. Sparse point data, so it lives outside the tile grid.
+- `business` (Phase 19): known-business identity per column — `0` none,
+  `1` walmart, `2` mcdonalds, `3` us_bank (registry in the dataset's
+  `businesses.json` sidecar). Resolved from OSM `brand`/`name`/`operator`
+  tags on the way or contained POI nodes, plus a manual overrides table.
+  The runtime overrides the class palette with the business's facade
+  palette and pylon sign.
+- `interior` (Phase 20): zone raster inside footprints whose business
+  registry entry carries a `layout`. Zone ids: `1` entrance_vestibule,
+  `2` checkout, `3` self_checkout, `4` grocery, `5` general_merchandise,
+  `6` clothing, `7` electronics, `8` pharmacy, `9` backroom_employee,
+  `10` cart_storage.
+- `businesses.json` (Phase 19): optional sidecar beside `manifest.json` —
+  `{"businesses": {key: {"id","display","palette","layout"}},
+  "instances": {stable_key: {"business","name","entrance","axis_deg"}}}`.
+  `stable_key` is `osm:way/<id>` for OSM footprints or `ms:<hash>` for
+  ML-only ones — never the collidable 16-bit `building_id`.
 - Unknown mask bits should be skipped by readers after parsing their section
   header (forward compatibility). Sections always appear in ascending bit
   order.

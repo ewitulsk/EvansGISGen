@@ -37,6 +37,8 @@ public final class GeoTile {
     static final int LAYER_ROADE = 0x200;
     static final int LAYER_BUILDING_ID = 0x400;
     static final int LAYER_BUILDING_ROOF = 0x800;
+    static final int LAYER_BUSINESS = 0x1000;
+    static final int LAYER_INTERIOR = 0x2000;
 
     private final int tileX;
     private final int tileZ;
@@ -53,13 +55,16 @@ public final class GeoTile {
     @Nullable private final byte[] roadDeckClass;
     @Nullable private final char[] buildingId;
     @Nullable private final short[] buildingRoof;
+    @Nullable private final byte[] business;
+    @Nullable private final byte[] interior;
 
     private GeoTile(int tileX, int tileZ, int tileSize, @Nullable short[] elevation,
             @Nullable byte[] influence, @Nullable byte[] surface, @Nullable byte[] road,
             @Nullable byte[] waterBits, @Nullable byte[] waterDepth,
             @Nullable byte[] building, @Nullable byte[] buildingLevels,
             @Nullable short[] roadDeck, @Nullable byte[] roadDeckClass,
-            @Nullable char[] buildingId, @Nullable short[] buildingRoof) {
+            @Nullable char[] buildingId, @Nullable short[] buildingRoof,
+            @Nullable byte[] business, @Nullable byte[] interior) {
         this.tileX = tileX;
         this.tileZ = tileZ;
         this.tileSize = tileSize;
@@ -75,6 +80,8 @@ public final class GeoTile {
         this.roadDeckClass = roadDeckClass;
         this.buildingId = buildingId;
         this.buildingRoof = buildingRoof;
+        this.business = business;
+        this.interior = interior;
     }
 
     public static GeoTile read(Path file, int tileSize) throws IOException {
@@ -107,8 +114,10 @@ public final class GeoTile {
         byte[] roadDeckClass = null;
         char[] buildingId = null;
         short[] buildingRoof = null;
+        byte[] business = null;
+        byte[] interior = null;
 
-        for (int bit = 1; bit <= 0x800; bit <<= 1) {
+        for (int bit = 1; bit <= 0x2000; bit <<= 1) {
             if ((mask & bit) == 0) {
                 continue;
             }
@@ -143,12 +152,14 @@ public final class GeoTile {
                     buildingRoof = new short[rawLen / 2];
                     ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN).asShortBuffer().get(buildingRoof);
                 }
+                case LAYER_BUSINESS -> business = payload;
+                case LAYER_INTERIOR -> interior = payload;
                 default -> { /* unknown bit, already skipped by mask check */ }
             }
         }
         return new GeoTile(tileX, tileZ, tileSize, elevation, influence, surface, road,
                 water, waterDepth, building, buildingLevels, roadDeck, roadDeckClass,
-                buildingId, buildingRoof);
+                buildingId, buildingRoof, business, interior);
     }
 
     private static byte[] decompress(int codec, byte[] stored, int rawLen) throws IOException {
@@ -290,6 +301,30 @@ public final class GeoTile {
      */
     public int buildingRoofY(int localX, int localZ) {
         return buildingRoof == null ? NO_DATA : buildingRoof[idx(localX, localZ)];
+    }
+
+    public boolean hasBusiness() {
+        return business != null;
+    }
+
+    /**
+     * Known-business registry id for this column (0 = none) — indexes the
+     * dataset's businesses.json registry (Phase 19).
+     */
+    public int business(int localX, int localZ) {
+        return business == null ? 0 : business[idx(localX, localZ)] & 0xFF;
+    }
+
+    public boolean hasInterior() {
+        return interior != null;
+    }
+
+    /**
+     * Interior zone id for this column (0 = none) — vestibule/checkout/
+     * grocery/etc. inside known-business footprints (Phase 20).
+     */
+    public int interiorZone(int localX, int localZ) {
+        return interior == null ? 0 : interior[idx(localX, localZ)] & 0xFF;
     }
 
     public boolean hasRoadDeck() {

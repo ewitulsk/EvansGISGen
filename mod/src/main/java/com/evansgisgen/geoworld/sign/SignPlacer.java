@@ -29,6 +29,12 @@ public final class SignPlacer {
 
     public static void place(SignIndex index, WorldGenLevel level,
             ChunkAccess chunk, ToIntFunction<BlockPos> groundAt) {
+        place(index, level, chunk, groundAt, groundAt);
+    }
+
+    public static void place(SignIndex index, WorldGenLevel level,
+            ChunkAccess chunk, ToIntFunction<BlockPos> groundAt,
+            ToIntFunction<BlockPos> pylonGroundAt) {
         List<SignIndex.Sign> signs =
                 index.inChunk(chunk.getPos().x, chunk.getPos().z);
         if (signs.isEmpty()) {
@@ -36,18 +42,36 @@ public final class SignPlacer {
         }
         BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
         for (SignIndex.Sign sign : signs) {
-            int ground = groundAt.applyAsInt(pos.set(sign.x(), 0, sign.z()));
+            boolean pylon = "business_pylon".equals(sign.type());
+            int ground = (pylon ? pylonGroundAt : groundAt)
+                    .applyAsInt(pos.set(sign.x(), 0, sign.z()));
             if (ground <= level.getMinBuildHeight()) {
                 continue;
             }
-            pos.set(sign.x(), ground + 1, sign.z());
-            // Post + standing blade. The fence grounds the sign visually.
-            level.setBlock(pos, Blocks.OAK_FENCE.defaultBlockState(), 0);
-            pos.setY(ground + 2);
-            level.setBlock(pos, Blocks.OAK_SIGN.defaultBlockState()
-                    .setValue(BlockStateProperties.ROTATION_16,
-                            sign.rot() & 15), 0);
-            chunk.setBlockEntityNbt(signTag(pos, sign, level.registryAccess()));
+            if (pylon) {
+                // Phase 19 business pylon: a masonry pier, accent cap and
+                // a sign face — reads as a roadside store sign, not a
+                // sidewalk blade.
+                for (int y = ground + 1; y <= ground + 4; y++) {
+                    level.setBlock(pos.set(sign.x(), y, sign.z()),
+                            Blocks.SMOOTH_STONE.defaultBlockState(), 0);
+                }
+                pos.set(sign.x(), ground + 5, sign.z());
+                level.setBlock(pos,
+                        Blocks.OAK_SIGN.defaultBlockState()
+                                .setValue(BlockStateProperties.ROTATION_16,
+                                        sign.rot() & 15), 0);
+                chunk.setBlockEntityNbt(signTag(pos, sign, level.registryAccess()));
+            } else {
+                pos.set(sign.x(), ground + 1, sign.z());
+                // Post + standing blade. The fence grounds the sign visually.
+                level.setBlock(pos, Blocks.OAK_FENCE.defaultBlockState(), 0);
+                pos.setY(ground + 2);
+                level.setBlock(pos, Blocks.OAK_SIGN.defaultBlockState()
+                        .setValue(BlockStateProperties.ROTATION_16,
+                                sign.rot() & 15), 0);
+                chunk.setBlockEntityNbt(signTag(pos, sign, level.registryAccess()));
+            }
         }
     }
 
